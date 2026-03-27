@@ -1,0 +1,11 @@
+torchrun --nproc_per_node=1 train_pytorch_friction.py \
+	--h1 32 --h2 32 \
+    --n-ranks 20 \
+    --epochs 5000 \
+    --lr 3e-3\
+    --batch-size 1024 \
+    --n-seeds 1 \
+	 --print-every 50 \
+    --folder ./data \
+    --model-file ./friction_emulator.txt \
+    --checkpoint ./friction_emulator.pt
