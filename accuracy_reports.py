@@ -9,6 +9,10 @@ import torch
 import torch.nn as nn
 
 
+LATEX_FIGSIZE = (3.27, 2.55)  # 8.3 cm wide
+LATEX_SQUARE_FIGSIZE = (3.27, 3.0)
+
+
 def fmt_sci(value: float) -> str:
     return f"{float(value):.6e}"
 
@@ -117,6 +121,26 @@ def print_m_summary(m_values: np.ndarray, total_count: int) -> None:
     )
 
 
+def configure_matplotlib_for_latex(plt) -> None:
+    plt.rcParams.update(
+        {
+            "font.size": 8,
+            "axes.labelsize": 8,
+            "axes.titlesize": 9,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "legend.fontsize": 7,
+        }
+    )
+
+
+def save_matplotlib_figure(fig, path: Path) -> None:
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
+    print(f"Saved {path}")
+    print(f"Saved {path.with_suffix('.pdf')}")
+
+
 def _svg_scale(value: float, src_min: float, src_max: float, dst_min: float, dst_max: float) -> float:
     if src_max == src_min:
         return 0.5 * (dst_min + dst_max)
@@ -169,8 +193,8 @@ def save_accuracy_svgs(
         body.append(f'<text x="{left + 32}" y="{y}" font-family="Arial" font-size="14">{name}</text>')
     body.extend(
         [
-            f'<text x="{left + plot_w / 2}" y="{height - 28}" text-anchor="middle" font-family="Arial" font-size="15">True alpha2</text>',
-            f'<text x="24" y="{top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 24 {top + plot_h / 2})" font-family="Arial" font-size="15">Predicted alpha2</text>',
+            f'<text x="{left + plot_w / 2}" y="{height - 28}" text-anchor="middle" font-family="Arial" font-size="15">True alpha^2</text>',
+            f'<text x="24" y="{top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 24 {top + plot_h / 2})" font-family="Arial" font-size="15">Predicted alpha^2</text>',
         ]
     )
     scatter_path = out_dir / "prediction_scatter.svg"
@@ -195,7 +219,7 @@ def save_accuracy_svgs(
     body.append(f'<line x1="{zero_x:.2f}" y1="{top}" x2="{zero_x:.2f}" y2="{top + plot_h}" stroke="#333" stroke-dasharray="5,5"/>')
     body.extend(
         [
-            f'<text x="{left + plot_w / 2}" y="{height - 28}" text-anchor="middle" font-family="Arial" font-size="15">Prediction error (predicted - true)</text>',
+            f'<text x="{left + plot_w / 2}" y="{height - 28}" text-anchor="middle" font-family="Arial" font-size="15">Prediction error, alpha^2_pred - alpha^2</text>',
             f'<text x="24" y="{top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 24 {top + plot_h / 2})" font-family="Arial" font-size="15">Count</text>',
         ]
     )
@@ -230,7 +254,7 @@ def save_accuracy_svgs(
         f'<line x1="{left + 18}" y1="{top + 44}" x2="{left + 52}" y2="{top + 44}" stroke="#ff7f0e" stroke-width="2"/>',
         f'<text x="{left + 62}" y="{top + 49}" font-family="Arial" font-size="14">validation</text>',
         f'<text x="{left + plot_w / 2}" y="{height - 28}" text-anchor="middle" font-family="Arial" font-size="15">Epoch</text>',
-        f'<text x="24" y="{top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 24 {top + plot_h / 2})" font-family="Arial" font-size="15">RMSE (log scale)</text>',
+        f'<text x="24" y="{top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 24 {top + plot_h / 2})" font-family="Arial" font-size="15">RMSE of alpha^2 (log scale)</text>',
     ]
     loss_path = out_dir / "loss_curves.svg"
     _write_svg(loss_path, width, height, body)
@@ -254,7 +278,7 @@ def save_accuracy_svgs(
             )
         body.extend(
             [
-                f'<text x="{left + plot_w / 2}" y="{height - 28}" text-anchor="middle" font-family="Arial" font-size="15">m = ln(vmag) / (ln(alpha2/C2) + ln(vmag))</text>',
+                f'<text x="{left + plot_w / 2}" y="{height - 28}" text-anchor="middle" font-family="Arial" font-size="15">m = ln(|u_b|) / (ln(alpha^2/C^2) + ln(|u_b|))</text>',
                 f'<text x="24" y="{top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 24 {top + plot_h / 2})" font-family="Arial" font-size="15">Count</text>',
             ]
         )
@@ -282,6 +306,7 @@ def save_accuracy_outputs(
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        configure_matplotlib_for_latex(plt)
     except ModuleNotFoundError:
         print(
             "matplotlib is not installed; saving lightweight SVG plots instead. "
@@ -290,7 +315,7 @@ def save_accuracy_outputs(
         save_accuracy_svgs(out_dir, split_predictions, history_by_seed, best_seed, test_x_raw)
         return
 
-    plt.figure(figsize=(7, 6))
+    fig, ax = plt.subplots(figsize=LATEX_SQUARE_FIGSIZE)
     all_true = []
     all_pred = []
     for name, (y_true, y_pred) in split_predictions.items():
@@ -298,66 +323,61 @@ def save_accuracy_outputs(
         y_pred_flat = y_pred.reshape(-1)
         all_true.append(y_true_flat)
         all_pred.append(y_pred_flat)
-        plt.scatter(y_true_flat, y_pred_flat, s=10, alpha=0.45, label=name)
+        ax.scatter(y_true_flat, y_pred_flat, s=6, alpha=0.45, label=name)
     all_true_flat = np.concatenate(all_true)
     all_pred_flat = np.concatenate(all_pred)
     lo = float(min(np.min(all_true_flat), np.min(all_pred_flat)))
     hi = float(max(np.max(all_true_flat), np.max(all_pred_flat)))
-    plt.plot([lo, hi], [lo, hi], "k--", linewidth=1, label="ideal")
-    plt.xlabel("True alpha2")
-    plt.ylabel("Predicted alpha2")
-    plt.title("Prediction Scatter")
-    plt.legend()
-    plt.tight_layout()
+    ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.8, label="ideal")
+    ax.set_xlabel(r"True $\alpha^2$")
+    ax.set_ylabel(r"Predicted $\alpha^2$")
+    ax.set_title("Prediction Scatter")
+    ax.legend(frameon=False)
+    fig.tight_layout()
     scatter_path = out_dir / "prediction_scatter.png"
-    plt.savefig(scatter_path, dpi=200)
-    plt.close()
+    save_matplotlib_figure(fig, scatter_path)
+    plt.close(fig)
 
     test_true, test_pred = split_predictions["test"]
     test_error = (test_pred - test_true).reshape(-1)
-    plt.figure(figsize=(7, 5))
-    plt.hist(test_error, bins=60, alpha=0.85)
-    plt.axvline(0.0, color="k", linestyle="--", linewidth=1)
-    plt.xlabel("Prediction error (predicted - true)")
-    plt.ylabel("Count")
-    plt.title("Test Error Histogram")
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
+    ax.hist(test_error, bins=60, alpha=0.85)
+    ax.axvline(0.0, color="k", linestyle="--", linewidth=0.8)
+    ax.set_xlabel(r"Prediction error, $\hat{\alpha}^2-\alpha^2$")
+    ax.set_ylabel("Count")
+    ax.set_title("Test Error Histogram")
+    fig.tight_layout()
     hist_path = out_dir / "test_error_histogram.png"
-    plt.savefig(hist_path, dpi=200)
-    plt.close()
+    save_matplotlib_figure(fig, hist_path)
+    plt.close(fig)
 
     history = history_by_seed[best_seed]
     epochs = [item["epoch"] for item in history]
     train_rmse = [item["train_rmse"] for item in history]
     val_rmse = [item["val_rmse"] for item in history]
-    plt.figure(figsize=(7, 5))
-    plt.plot(epochs, train_rmse, label="train")
-    plt.plot(epochs, val_rmse, label="validation")
-    plt.yscale("log")
-    plt.xlabel("Epoch")
-    plt.ylabel("RMSE")
-    plt.title(f"Loss Curves (seed {best_seed})")
-    plt.legend()
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
+    ax.plot(epochs, train_rmse, label="train", linewidth=1.0)
+    ax.plot(epochs, val_rmse, label="validation", linewidth=1.0)
+    ax.set_yscale("log")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(r"RMSE of $\alpha^2$")
+    ax.set_title(f"Loss Curves (seed {best_seed})")
+    ax.legend(frameon=False)
+    fig.tight_layout()
     loss_path = out_dir / "loss_curves.png"
-    plt.savefig(loss_path, dpi=200)
-    plt.close()
+    save_matplotlib_figure(fig, loss_path)
+    plt.close(fig)
 
     _, test_pred = split_predictions["test"]
     m_values = infer_m_values(test_x_raw, test_pred)
     print_m_summary(m_values, len(test_pred))
     if len(m_values) > 0:
-        plt.figure(figsize=(7, 5))
-        plt.hist(m_values, bins=60, alpha=0.85)
-        plt.xlabel("m = ln(vmag) / (ln(alpha2/C2) + ln(vmag))")
-        plt.ylabel("Count")
-        plt.title("Inferred m Histogram (test)")
-        plt.tight_layout()
+        fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
+        ax.hist(m_values, bins=60, alpha=0.85)
+        ax.set_xlabel(r"$m=\ln(|u_b|)/(\ln(\alpha^2/C^2)+\ln(|u_b|))$")
+        ax.set_ylabel("Count")
+        ax.set_title(r"Inferred $m$ Histogram (test)")
+        fig.tight_layout()
         m_path = out_dir / "inferred_m_histogram.png"
-        plt.savefig(m_path, dpi=200)
-        plt.close()
-        print(f"Saved inferred m histogram to {m_path}")
-
-    print(f"Saved prediction scatter to {scatter_path}")
-    print(f"Saved test error histogram to {hist_path}")
-    print(f"Saved loss curves to {loss_path}")
+        save_matplotlib_figure(fig, m_path)
+        plt.close(fig)
