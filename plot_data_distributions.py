@@ -133,8 +133,19 @@ def plot_hist_grid(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
-    fig.suptitle(title, fontsize=16)
+    plt.rcParams.update(
+        {
+            "font.size": 8,
+            "axes.labelsize": 8,
+            "axes.titlesize": 9,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "legend.fontsize": 7,
+        }
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=(6.3, 2.2))
+    fig.suptitle(title, fontsize=9)
     for i, ax in enumerate(axes):
         values = data[:, i]
         values = values[np.isfinite(values)]
@@ -143,9 +154,11 @@ def plot_hist_grid(
         ax.set_ylabel("count")
         ax.grid(alpha=0.2)
     fig.tight_layout()
-    fig.savefig(path, dpi=200)
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {path}")
+    print(f"Saved {path.with_suffix('.pdf')}")
 
 
 def plot_rank_counts(data: np.ndarray, path: Path) -> None:
@@ -154,20 +167,22 @@ def plot_rank_counts(data: np.ndarray, path: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(7, 4))
+    fig, ax = plt.subplots(figsize=(6.3, 2.2))
     ax.text(
         0.5,
         0.5,
         f"Loaded {len(data):,} samples",
         ha="center",
         va="center",
-        fontsize=20,
+        fontsize=10,
     )
     ax.axis("off")
     fig.tight_layout()
-    fig.savefig(path, dpi=200)
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {path}")
+    print(f"Saved {path.with_suffix('.pdf')}")
 
 
 def main() -> None:
