@@ -16,6 +16,7 @@ RAW_Y_OFFSET = np.array([0.0], dtype=np.float64)
 RAW_Y_SCALE = np.array([2.09e11], dtype=np.float64)
 
 VARIABLES = ("C2", "vmag", "alpha2")
+RAW_LABELS = (r"$C^2$", r"$|u_b|$", r"$\alpha^2$")
 
 
 def is_header_line(row: List[str]) -> bool:
@@ -208,36 +209,37 @@ def main() -> None:
 
     plot_hist_grid(
         data,
-        f"Raw Variable Distributions ({args.n_ranks} ranks)",
+        "Raw Variable Distributions",
         out_dir / "raw_distributions.png",
+        xlabels=RAW_LABELS,
         bins=args.bins,
     )
     plot_hist_grid(
         np.log10(np.maximum(data, floors)),
         f"Log10 Raw Variable Distributions ({args.n_ranks} ranks)",
         out_dir / "log10_raw_distributions.png",
-        xlabels=("log10(C2)", "log10(vmag)", "log10(alpha2)"),
+        xlabels=(r"$\log_{10}(C^2)$", r"$\log_{10}(|u_b|)$", r"$\log_{10}(\alpha^2)$"),
         bins=args.bins,
     )
     plot_hist_grid(
         raw_normalized,
         "Distributions After Positive Raw Scaling",
         out_dir / "raw_normalized_distributions.png",
-        xlabels=("C2 / 9.05e6", "vmag / 2.08e-5", "alpha2 / 2.09e11"),
+        xlabels=(r"$C^2 / 9.05e6$", r"$|u_b| / 2.08e-5$", r"$\alpha^2 / 2.09e11$"),
         bins=args.bins,
     )
     plot_hist_grid(
         log_normalized,
         "Distributions After Log Normalization",
         out_dir / "log_normalized_distributions.png",
-        xlabels=("C2 log-normalized", "vmag log-normalized", "alpha2 log-normalized"),
+        xlabels=(r"$C^2$ log-normalized", r"$|u_b|$ log-normalized", r"$\alpha^2$ log-normalized"),
         bins=args.bins,
     )
     plot_hist_grid(
         mixed_normalized,
         "Distributions After Mixed Normalization",
         out_dir / "mixed_normalized_distributions.png",
-        xlabels=("C2 / 9.05e6", "log(vmag) normalized", "log(alpha2) normalized"),
+        xlabels=(r"$C^2 / 9.05e6$", r"$\log(|u_b|)$ normalized", r"$\log(\alpha^2)$ normalized"),
         bins=args.bins,
     )
     plot_rank_counts(data, out_dir / "sample_count.png")
