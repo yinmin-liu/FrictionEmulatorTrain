@@ -1,3 +1,4 @@
 *.csv
 *.sh
 __pycache__/
+data/*

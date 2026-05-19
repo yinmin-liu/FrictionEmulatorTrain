@@ -15,7 +15,7 @@ This script does three things:
 3. saves a plain-text model file compatible with the existing C++ FrictionEmulator::Load()
 
 Example:
-  python train_pytorch_friction.py \
+  python train.py \
       --n-ranks 5 \
       --epochs 5000 \
       --lr 1e-3 \
