@@ -49,10 +49,10 @@ from accuracy_reports import (
 )
 
 
-FIXED_X_MEAN = np.array([9.05e6, 2.08e-5], dtype=np.float64)
-FIXED_X_STD = np.array([6.61e6, 4.67e-5], dtype=np.float64)
-FIXED_Y_MEAN = np.array([2.09e11], dtype=np.float64)
-FIXED_Y_STD = np.array([1.18e12], dtype=np.float64)
+RAW_X_OFFSET = np.array([0.0, 0.0], dtype=np.float64)
+RAW_X_SCALE = np.array([9.05e6, 2.08e-5], dtype=np.float64)
+RAW_Y_OFFSET = np.array([0.0], dtype=np.float64)
+RAW_Y_SCALE = np.array([2.09e11], dtype=np.float64)
 
 
 @dataclass
@@ -238,10 +238,10 @@ def build_normalization_config(
     if mode == "raw":
         return NormalizationConfig(
             mode=mode,
-            x_mean=FIXED_X_MEAN.copy(),
-            x_std=FIXED_X_STD.copy(),
-            y_mean=FIXED_Y_MEAN.copy(),
-            y_std=FIXED_Y_STD.copy(),
+            x_mean=RAW_X_OFFSET.copy(),
+            x_std=RAW_X_SCALE.copy(),
+            y_mean=RAW_Y_OFFSET.copy(),
+            y_std=RAW_Y_SCALE.copy(),
             x_floor=x_floor.astype(np.float64),
             y_floor=y_floor.astype(np.float64),
         )
@@ -665,13 +665,13 @@ def main() -> None:
         raise RuntimeError("No data loaded. Exiting.")
 
     train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
-    if args.in_dim != len(FIXED_X_MEAN):
+    if args.in_dim != len(RAW_X_SCALE):
         raise RuntimeError(
-            f"Expected in_dim={len(FIXED_X_MEAN)} for hard-coded normalization, got {args.in_dim}"
+            f"Expected in_dim={len(RAW_X_SCALE)} for hard-coded normalization, got {args.in_dim}"
         )
-    if args.out_dim != len(FIXED_Y_MEAN):
+    if args.out_dim != len(RAW_Y_SCALE):
         raise RuntimeError(
-            f"Expected out_dim={len(FIXED_Y_MEAN)} for hard-coded normalization, got {args.out_dim}"
+            f"Expected out_dim={len(RAW_Y_SCALE)} for hard-coded normalization, got {args.out_dim}"
         )
 
     train_x_raw, train_y_raw = to_numpy(train_data)

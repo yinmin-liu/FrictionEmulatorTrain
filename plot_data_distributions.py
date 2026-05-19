@@ -10,10 +10,10 @@ from typing import List, Tuple
 import numpy as np
 
 
-RAW_X_MEAN = np.array([9.05e6, 2.08e-5], dtype=np.float64)
-RAW_X_STD = np.array([6.61e6, 4.67e-5], dtype=np.float64)
-RAW_Y_MEAN = np.array([2.09e11], dtype=np.float64)
-RAW_Y_STD = np.array([1.18e12], dtype=np.float64)
+RAW_X_OFFSET = np.array([0.0, 0.0], dtype=np.float64)
+RAW_X_SCALE = np.array([9.05e6, 2.08e-5], dtype=np.float64)
+RAW_Y_OFFSET = np.array([0.0], dtype=np.float64)
+RAW_Y_SCALE = np.array([2.09e11], dtype=np.float64)
 
 VARIABLES = ("C2", "vmag", "alpha2")
 
@@ -72,8 +72,8 @@ def load_rank_data(folder: str, n_ranks: int) -> np.ndarray:
     return data
 
 
-def standardize(values: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    return (values - mean) / std
+def normalize(values: np.ndarray, offset: np.ndarray, scale: np.ndarray) -> np.ndarray:
+    return (values - offset) / scale
 
 
 def log_transform(values: np.ndarray, floors: np.ndarray) -> np.ndarray:
@@ -85,7 +85,7 @@ def compute_log_normalized(data: np.ndarray, floors: np.ndarray) -> Tuple[np.nda
     mean = logged.mean(axis=0)
     std = logged.std(axis=0)
     std[std < 1e-12] = 1.0
-    return standardize(logged, mean, std), mean, std
+    return normalize(logged, mean, std), mean, std
 
 
 def print_summary(name: str, data: np.ndarray) -> None:
@@ -175,14 +175,14 @@ def main() -> None:
 
     data = load_rank_data(args.folder, args.n_ranks)
     floors = np.array([args.log_c2_floor, args.log_v_floor, args.log_alpha2_floor], dtype=np.float64)
-    raw_mean = np.concatenate([RAW_X_MEAN, RAW_Y_MEAN])
-    raw_std = np.concatenate([RAW_X_STD, RAW_Y_STD])
-    raw_normalized = standardize(data, raw_mean, raw_std)
+    raw_offset = np.concatenate([RAW_X_OFFSET, RAW_Y_OFFSET])
+    raw_scale = np.concatenate([RAW_X_SCALE, RAW_Y_SCALE])
+    raw_normalized = normalize(data, raw_offset, raw_scale)
     log_data = log_transform(data, floors)
     log_normalized, log_mean, log_std = compute_log_normalized(data, floors)
 
     print_summary("Raw variables", data)
-    print_summary("Raw-normalized variables", raw_normalized)
+    print_summary("Positive raw-scaled variables", raw_normalized)
     print_summary("Log variables", log_data)
     print_summary("Log-normalized variables", log_normalized)
     print("\nLog normalization constants from loaded data")
@@ -205,9 +205,9 @@ def main() -> None:
     )
     plot_hist_grid(
         raw_normalized,
-        "Distributions After Current Raw Normalization",
+        "Distributions After Positive Raw Scaling",
         out_dir / "raw_normalized_distributions.png",
-        xlabels=("C2 raw-normalized", "vmag raw-normalized", "alpha2 raw-normalized"),
+        xlabels=("C2 / 9.05e6", "vmag / 2.08e-5", "alpha2 / 2.09e11"),
         bins=args.bins,
     )
     plot_hist_grid(
