@@ -35,12 +35,19 @@ import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+
+from accuracy_reports import (
+    compute_accuracy_metrics,
+    predict_raw,
+    print_accuracy_metrics,
+    save_accuracy_outputs,
+)
 
 
 FIXED_X_MEAN = np.array([9.05e6, 2.08e-5], dtype=np.float64)
@@ -79,6 +86,15 @@ def fmt_seq(values: List[float]) -> str:
 
 def fmt_percent(value: float) -> str:
     return f"{float(value):.6f}"
+
+
+def describe_device(device: torch.device) -> str:
+    if device.type == "cuda":
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        return torch.cuda.get_device_name(index)
+    if device.type == "mps":
+        return "Apple Metal Performance Shaders"
+    return "CPU"
 
 
 # -----------------------------------------------------------------------------
@@ -375,7 +391,7 @@ def train_one_seed(
     batch_size: int,
     print_every: int,
     device: torch.device,
-) -> Tuple[FrictionMLP, float]:
+) -> Tuple[FrictionMLP, float, List[Dict[str, float]]]:
     set_seed(seed)
 
     model = FrictionMLP(in_dim=in_dim, h1=h1, h2=h2, out_dim=out_dim).to(device)
@@ -405,6 +421,7 @@ def train_one_seed(
 
     best_val_rmse = float("inf")
     best_state = None
+    history = []
 
     print("\n==============================")
     print(f"Seed {seed}")
@@ -452,6 +469,14 @@ def train_one_seed(
                 f"Epoch {epoch}  Train RMSE = {fmt_sci(train_rmse)}"
                 f"  Val RMSE = {fmt_sci(val_rmse)}"
             )
+            history.append(
+                {
+                    "epoch": float(epoch),
+                    "train_rmse": float(train_rmse),
+                    "val_rmse": float(val_rmse),
+                    "train_mse_norm": float(total_loss / max(total_count, 1)),
+                }
+            )
 
             if val_rmse < best_val_rmse:
                 best_val_rmse = val_rmse
@@ -474,7 +499,7 @@ def train_one_seed(
         batch_size=batch_size,
     )
     print(f"Seed {seed} final Val RMSE = {fmt_sci(final_val_rmse)}")
-    return model, final_val_rmse
+    return model, final_val_rmse, history
 
 
 # -----------------------------------------------------------------------------
@@ -495,15 +520,23 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--n-seeds", type=int, default=5)
     parser.add_argument("--print-every", type=int, default=100)
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
+    parser.add_argument("--plots-dir", type=str, default="./plots")
     args = parser.parse_args()
 
     if args.device == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
     else:
         device = torch.device(args.device)
         if device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("--device cuda was requested, but CUDA is not available")
+        if device.type == "mps" and not torch.backends.mps.is_available():
+            raise RuntimeError("--device mps was requested, but MPS is not available")
 
     print("========================================")
     print("FrictionEmulator Training (PyTorch)")
@@ -516,11 +549,12 @@ def main() -> None:
     print(f"N seeds:      {args.n_seeds}")
     print(f"Model file:   {args.model_file}")
     print(f"Checkpoint:   {args.checkpoint}")
+    print(f"Plots dir:    {args.plots_dir}")
     print(
         f"Architecture: {args.in_dim} -> {args.h1} ->"
         f" {args.h2} -> {args.out_dim}"
     )
-    print(f"Device:       {device}")
+    print(f"Device:       {device} ({describe_device(device)})")
     print("========================================")
 
     all_data = load_data(args.folder, args.n_ranks, args.in_dim, args.out_dim)
@@ -553,9 +587,11 @@ def main() -> None:
 
     best_model = None
     best_val_rmse = float("inf")
+    best_seed = None
+    history_by_seed: Dict[int, List[Dict[str, float]]] = {}
 
     for seed in range(args.n_seeds):
-        model, val_rmse = train_one_seed(
+        model, val_rmse, history = train_one_seed(
             seed=seed,
             train_x_raw=train_x_raw,
             train_y_raw=train_y_raw,
@@ -575,27 +611,43 @@ def main() -> None:
             print_every=args.print_every,
             device=device,
         )
+        history_by_seed[seed] = history
 
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
             best_model = model.cpu()
+            best_seed = seed
             print(f"--> New best model at seed {seed}")
 
     assert best_model is not None
+    assert best_seed is not None
 
     print("\n========================================")
-    print(f"Best model (Val RMSE = {fmt_sci(best_val_rmse)})")
+    print(f"Best model (seed {best_seed}, Val RMSE = {fmt_sci(best_val_rmse)})")
     print("========================================")
 
-    train_rmse = compute_rmse(best_model, train_x_raw, train_y_raw, x_mean, x_std, y_mean, y_std, torch.device("cpu"), args.batch_size)
-    val_rmse = compute_rmse(best_model, val_x_raw, val_y_raw, x_mean, x_std, y_mean, y_std, torch.device("cpu"), args.batch_size)
-    test_rmse = compute_rmse(best_model, test_x_raw, test_y_raw, x_mean, x_std, y_mean, y_std, torch.device("cpu"), args.batch_size)
+    eval_device = torch.device("cpu")
+    split_predictions = {
+        "train": (
+            train_y_raw,
+            predict_raw(best_model, train_x_raw, x_mean, x_std, y_mean, y_std, eval_device, args.batch_size),
+        ),
+        "validation": (
+            val_y_raw,
+            predict_raw(best_model, val_x_raw, x_mean, x_std, y_mean, y_std, eval_device, args.batch_size),
+        ),
+        "test": (
+            test_y_raw,
+            predict_raw(best_model, test_x_raw, x_mean, x_std, y_mean, y_std, eval_device, args.batch_size),
+        ),
+    }
 
-    print(f"Train RMSE      = {fmt_sci(train_rmse)}")
-    print(f"Validation RMSE = {fmt_sci(val_rmse)}")
-    print(f"Test RMSE       = {fmt_sci(test_rmse)}")
+    print_accuracy_metrics("Train", compute_accuracy_metrics(*split_predictions["train"]))
+    print_accuracy_metrics("Validation", compute_accuracy_metrics(*split_predictions["validation"]))
+    print_accuracy_metrics("Test", compute_accuracy_metrics(*split_predictions["test"]))
 
     print_samples(best_model, test_data, x_mean, x_std, y_mean, y_std, torch.device("cpu"), n_samples=5)
+    save_accuracy_outputs(args.plots_dir, split_predictions, history_by_seed, best_seed)
 
     checkpoint = {
         "state_dict": best_model.state_dict(),

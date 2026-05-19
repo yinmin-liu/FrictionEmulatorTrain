@@ -3,7 +3,7 @@ torchrun --nproc_per_node=1 train.py \
     --n-ranks 5 \
     --epochs 5000 \
     --lr 3e-3\
-    --batch-size 1024 \
+    --batch-size 128 \
     --n-seeds 1 \
 	 --print-every 50 \
     --folder ./data \
