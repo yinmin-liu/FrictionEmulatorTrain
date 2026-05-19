@@ -247,14 +247,22 @@ def main() -> None:
         log_normalized,
         "Distributions After Log Normalization",
         out_dir / "log_normalized_distributions.png",
-        xlabels=(r"$C^2$ log-normalized", r"$|u_b|$ log-normalized", r"$\alpha^2$ log-normalized"),
+        xlabels=(
+            r"$(\ln C^2-\mu_{\ln C^2})/\sigma_{\ln C^2}$",
+            r"$(\ln |u_b|-\mu_{\ln |u_b|})/\sigma_{\ln |u_b|}$",
+            r"$(\ln \alpha^2-\mu_{\ln \alpha^2})/\sigma_{\ln \alpha^2}$",
+        ),
         bins=args.bins,
     )
     plot_hist_grid(
         mixed_normalized,
         "Distributions After Mixed Normalization",
         out_dir / "mixed_normalized_distributions.png",
-        xlabels=(r"$C^2 / 9.05e6$", r"$\log(|u_b|)$ normalized", r"$\log(\alpha^2)$ normalized"),
+        xlabels=(
+            r"$C^2 / 9.05e6$",
+            r"$(\ln |u_b|-\mu_{\ln |u_b|})/\sigma_{\ln |u_b|}$",
+            r"$(\ln \alpha^2-\mu_{\ln \alpha^2})/\sigma_{\ln \alpha^2}$",
+        ),
         bins=args.bins,
     )
     plot_rank_counts(data, out_dir / "sample_count.png")
