@@ -246,6 +246,25 @@ def build_normalization_config(
             y_floor=y_floor.astype(np.float64),
         )
 
+    if mode == "mixed":
+        x_trans = transform_x_np(train_x_raw, mode, x_floor)
+        y_trans = transform_y_np(train_y_raw, mode, y_floor)
+        x_mean = np.array([0.0, x_trans[:, 1].mean()], dtype=np.float64)
+        x_std = np.array([RAW_X_SCALE[0], x_trans[:, 1].std()], dtype=np.float64)
+        y_mean = y_trans.mean(axis=0)
+        y_std = y_trans.std(axis=0)
+        x_std[x_std < 1e-12] = 1.0
+        y_std[y_std < 1e-12] = 1.0
+        return NormalizationConfig(
+            mode=mode,
+            x_mean=x_mean.astype(np.float64),
+            x_std=x_std.astype(np.float64),
+            y_mean=y_mean.astype(np.float64),
+            y_std=y_std.astype(np.float64),
+            x_floor=x_floor.astype(np.float64),
+            y_floor=y_floor.astype(np.float64),
+        )
+
     if mode != "log":
         raise RuntimeError(f"Unsupported normalization mode: {mode}")
 
@@ -272,6 +291,10 @@ def transform_x_np(x_raw: np.ndarray, mode: str, x_floor: np.ndarray) -> np.ndar
     x = np.asarray(x_raw, dtype=np.float64)
     if mode == "raw":
         return x
+    if mode == "mixed":
+        x_trans = x.copy()
+        x_trans[:, 1] = np.log(np.maximum(x[:, 1], x_floor[1]))
+        return x_trans
     return np.log(np.maximum(x, x_floor))
 
 
@@ -286,6 +309,10 @@ def transform_x_torch(x_raw: torch.Tensor, norm: NormalizationConfig, device: to
     if norm.mode == "raw":
         return x_raw
     x_floor = torch.as_tensor(norm.x_floor, dtype=torch.float32, device=device)
+    if norm.mode == "mixed":
+        c2 = x_raw[:, 0:1]
+        vmag = torch.log(torch.maximum(x_raw[:, 1:2], x_floor[1]))
+        return torch.cat((c2, vmag), dim=1)
     return torch.log(torch.maximum(x_raw, x_floor))
 
 
@@ -447,6 +474,10 @@ def export_to_cpp_text(
         if norm.mode != "raw":
             f.write(f"NORMALIZATION {norm.mode}\n")
             f.write("LOG_BASE e\n")
+            if norm.mode == "mixed":
+                f.write("x_transform raw\n")
+                f.write("x_transform log\n")
+                f.write("y_transform log\n")
             for j in range(in_dim):
                 f.write(f"x_floor {float(norm.x_floor[j]):.17g}\n")
             for j in range(out_dim):
@@ -620,7 +651,7 @@ def main() -> None:
     parser.add_argument("--print-every", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--plots-dir", type=str, default="./plots")
-    parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log"])
+    parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log", "mixed"])
     parser.add_argument("--log-c2-floor", type=float, default=1e-30)
     parser.add_argument("--log-v-floor", type=float, default=1e-12)
     parser.add_argument("--log-alpha2-floor", type=float, default=1e-30)

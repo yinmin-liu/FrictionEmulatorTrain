@@ -88,6 +88,16 @@ def compute_log_normalized(data: np.ndarray, floors: np.ndarray) -> Tuple[np.nda
     return normalize(logged, mean, std), mean, std
 
 
+def compute_mixed_normalized(data: np.ndarray, floors: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    mixed = data.copy()
+    mixed[:, 1] = np.log(np.maximum(data[:, 1], floors[1]))
+    mixed[:, 2] = np.log(np.maximum(data[:, 2], floors[2]))
+    mean = np.array([RAW_X_OFFSET[0], mixed[:, 1].mean(), mixed[:, 2].mean()], dtype=np.float64)
+    scale = np.array([RAW_X_SCALE[0], mixed[:, 1].std(), mixed[:, 2].std()], dtype=np.float64)
+    scale[scale < 1e-12] = 1.0
+    return normalize(mixed, mean, scale), mean, scale
+
+
 def print_summary(name: str, data: np.ndarray) -> None:
     print(f"\n{name}")
     print("-" * len(name))
@@ -180,15 +190,21 @@ def main() -> None:
     raw_normalized = normalize(data, raw_offset, raw_scale)
     log_data = log_transform(data, floors)
     log_normalized, log_mean, log_std = compute_log_normalized(data, floors)
+    mixed_normalized, mixed_mean, mixed_std = compute_mixed_normalized(data, floors)
 
     print_summary("Raw variables", data)
     print_summary("Positive raw-scaled variables", raw_normalized)
     print_summary("Log variables", log_data)
     print_summary("Log-normalized variables", log_normalized)
+    print_summary("Mixed-normalized variables", mixed_normalized)
     print("\nLog normalization constants from loaded data")
     print("--------------------------------------------")
     for variable, mean, std, floor in zip(VARIABLES, log_mean, log_std, floors):
         print(f"{variable:<7} mean={mean:.17g} std={std:.17g} floor={floor:.17g}")
+    print("\nMixed normalization constants from loaded data")
+    print("----------------------------------------------")
+    for variable, mean, std in zip(VARIABLES, mixed_mean, mixed_std):
+        print(f"{variable:<7} mean={mean:.17g} std={std:.17g}")
 
     plot_hist_grid(
         data,
@@ -215,6 +231,13 @@ def main() -> None:
         "Distributions After Log Normalization",
         out_dir / "log_normalized_distributions.png",
         xlabels=("C2 log-normalized", "vmag log-normalized", "alpha2 log-normalized"),
+        bins=args.bins,
+    )
+    plot_hist_grid(
+        mixed_normalized,
+        "Distributions After Mixed Normalization",
+        out_dir / "mixed_normalized_distributions.png",
+        xlabels=("C2 / 9.05e6", "log(vmag) normalized", "log(alpha2) normalized"),
         bins=args.bins,
     )
     plot_rank_counts(data, out_dir / "sample_count.png")
