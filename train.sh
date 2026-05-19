@@ -1,12 +1,13 @@
 torchrun --nproc_per_node=1 train.py \
 	--h1 32 --h2 32 \
-    --n-ranks 5 \
-    --epochs 5000 \
+    --n-ranks 10 \
+    --epochs 1000 \
     --lr 3e-3\
-    --batch-size 128 \
+    --batch-size 16384 \
     --n-seeds 1 \
 	 --print-every 50 \
     --folder ./data \
     --model-file ./friction_emulator.txt \
     --checkpoint ./friction_emulator.pt \
-	 --device auto
+	 --device auto \
+	 --normalization log
