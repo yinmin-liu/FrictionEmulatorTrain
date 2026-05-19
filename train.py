@@ -305,6 +305,24 @@ def transform_y_np(y_raw: np.ndarray, mode: str, y_floor: np.ndarray) -> np.ndar
     return np.log(np.maximum(y, y_floor))
 
 
+def normalize_x_np(x_raw: np.ndarray, norm: NormalizationConfig) -> np.ndarray:
+    return (transform_x_np(x_raw, norm.mode, norm.x_floor) - norm.x_mean) / norm.x_std
+
+
+def normalize_y_np(y_raw: np.ndarray, norm: NormalizationConfig) -> np.ndarray:
+    return (transform_y_np(y_raw, norm.mode, norm.y_floor) - norm.y_mean) / norm.y_std
+
+
+def inverse_transform_y_np(y_trans: np.ndarray, norm: NormalizationConfig) -> np.ndarray:
+    if norm.mode == "raw":
+        return y_trans
+    return np.exp(y_trans)
+
+
+def denormalize_y_np(y_norm: np.ndarray, norm: NormalizationConfig) -> np.ndarray:
+    return inverse_transform_y_np(y_norm * norm.y_std + norm.y_mean, norm)
+
+
 def transform_x_torch(x_raw: torch.Tensor, norm: NormalizationConfig, device: torch.device) -> torch.Tensor:
     if norm.mode == "raw":
         return x_raw
@@ -414,9 +432,23 @@ def predict_raw(
     return np.concatenate(preds, axis=0)
 
 
+def predict_xgboost_raw(model, x_raw: np.ndarray, norm: NormalizationConfig, iteration: int | None = None) -> np.ndarray:
+    x_norm = normalize_x_np(x_raw, norm).astype(np.float32)
+    kwargs = {}
+    if iteration is not None:
+        kwargs["iteration_range"] = (0, iteration)
+    pred_norm = np.asarray(model.predict(x_norm, **kwargs), dtype=np.float64).reshape(-1, len(norm.y_mean))
+    return denormalize_y_np(pred_norm, norm)
+
+
+def compute_rmse_from_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    err = y_pred - y_true
+    return float(np.sqrt(np.mean(err * err)))
+
+
 @torch.no_grad()
-def print_samples(
-    model: nn.Module,
+def print_mlp_samples(
+    model: FrictionMLP,
     data: List[FrictionSample],
     norm: NormalizationConfig,
     device: torch.device,
@@ -440,6 +472,21 @@ def print_samples(
         msg = f"  Sample {i}  inputs: {fmt_seq(samp.x)}"
         for j, true_val in enumerate(samp.y):
             pred_val = float(pred[j])
+            rel_err = abs(pred_val - true_val) / (abs(true_val) + 1e-10) * 100.0
+            msg += (
+                f"  true={fmt_sci(true_val)}"
+                f"  pred={fmt_sci(pred_val)}"
+                f"  rel_err={fmt_percent(rel_err)}%"
+            )
+        print(msg)
+
+
+def print_sample_predictions(data: List[FrictionSample], predictions: np.ndarray, n_samples: int = 5) -> None:
+    print("\nSample predictions:")
+    for i, samp in enumerate(data[:n_samples]):
+        msg = f"  Sample {i}  inputs: {fmt_seq(samp.x)}"
+        for j, true_val in enumerate(samp.y):
+            pred_val = float(predictions[i, j])
             rel_err = abs(pred_val - true_val) / (abs(true_val) + 1e-10) * 100.0
             msg += (
                 f"  true={fmt_sci(true_val)}"
@@ -631,6 +678,86 @@ def train_one_seed(
     return model, final_val_rmse, history
 
 
+def train_xgboost(
+    train_x_raw: np.ndarray,
+    train_y_raw: np.ndarray,
+    val_x_raw: np.ndarray,
+    val_y_raw: np.ndarray,
+    norm: NormalizationConfig,
+    n_estimators: int,
+    max_depth: int,
+    lr: float,
+    print_every: int,
+    seed: int,
+    device: torch.device,
+):
+    try:
+        from xgboost import XGBRegressor
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "XGBoost is not installed. Install it or run with --model-type mlp."
+        ) from exc
+
+    train_x = normalize_x_np(train_x_raw, norm).astype(np.float32)
+    train_y = normalize_y_np(train_y_raw, norm).astype(np.float32).reshape(-1)
+    val_x = normalize_x_np(val_x_raw, norm).astype(np.float32)
+    val_y = normalize_y_np(val_y_raw, norm).astype(np.float32).reshape(-1)
+
+    xgb_device = "cuda" if device.type == "cuda" else "cpu"
+    model = XGBRegressor(
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=lr,
+        objective="reg:squarederror",
+        tree_method="hist",
+        device=xgb_device,
+        subsample=1.0,
+        colsample_bytree=1.0,
+        random_state=seed,
+        n_jobs=0,
+        eval_metric="rmse",
+    )
+
+    print("\n==============================")
+    print("XGBoost")
+    print("==============================")
+    model.fit(
+        train_x,
+        train_y,
+        eval_set=[(train_x, train_y), (val_x, val_y)],
+        verbose=False,
+    )
+
+    history = []
+    checkpoints = sorted(set(list(range(1, n_estimators + 1, print_every)) + [n_estimators]))
+    best_val_rmse = float("inf")
+    best_iteration = n_estimators
+    for iteration in checkpoints:
+        train_pred = predict_xgboost_raw(model, train_x_raw, norm, iteration=iteration)
+        val_pred = predict_xgboost_raw(model, val_x_raw, norm, iteration=iteration)
+        train_rmse = compute_rmse_from_predictions(train_y_raw, train_pred)
+        val_rmse = compute_rmse_from_predictions(val_y_raw, val_pred)
+        epoch = iteration - 1
+        print(
+            f"Round {epoch}  Train RMSE = {fmt_sci(train_rmse)}"
+            f"  Val RMSE = {fmt_sci(val_rmse)}"
+        )
+        history.append(
+            {
+                "epoch": float(epoch),
+                "train_rmse": float(train_rmse),
+                "val_rmse": float(val_rmse),
+                "train_mse_norm": float("nan"),
+            }
+        )
+        if val_rmse < best_val_rmse:
+            best_val_rmse = val_rmse
+            best_iteration = iteration
+
+    print(f"XGBoost final Val RMSE = {fmt_sci(best_val_rmse)}")
+    return model, best_val_rmse, history, best_iteration
+
+
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
@@ -639,6 +766,8 @@ def main() -> None:
     parser.add_argument("--folder", type=str, default="./data")
     parser.add_argument("--model-file", type=str, default="./friction_emulator.txt")
     parser.add_argument("--checkpoint", type=str, default="./friction_emulator.pt")
+    parser.add_argument("--xgb-model-file", type=str, default="./friction_emulator_xgboost.json")
+    parser.add_argument("--model-type", type=str, default="mlp", choices=["mlp", "xgboost"])
     parser.add_argument("--n-ranks", type=int, default=1)
     parser.add_argument("--in-dim", type=int, default=2)
     parser.add_argument("--out-dim", type=int, default=1)
@@ -649,6 +778,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--n-seeds", type=int, default=5)
     parser.add_argument("--print-every", type=int, default=100)
+    parser.add_argument("--xgb-n-estimators", type=int, default=500)
+    parser.add_argument("--xgb-max-depth", type=int, default=6)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--plots-dir", type=str, default="./plots")
     parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log", "mixed"])
@@ -680,7 +811,9 @@ def main() -> None:
     print(f"LR:           {fmt_sci(args.lr)}")
     print(f"Batch size:   {args.batch_size}")
     print(f"N seeds:      {args.n_seeds}")
+    print(f"Model type:   {args.model_type}")
     print(f"Model file:   {args.model_file}")
+    print(f"XGB file:     {args.xgb_model_file}")
     print(f"Checkpoint:   {args.checkpoint}")
     print(f"Plots dir:    {args.plots_dir}")
     print(f"Normalization:{args.normalization}")
@@ -723,33 +856,54 @@ def main() -> None:
     best_model = None
     best_val_rmse = float("inf")
     best_seed = None
+    best_iteration = None
     history_by_seed: Dict[int, List[Dict[str, float]]] = {}
 
-    for seed in range(args.n_seeds):
-        model, val_rmse, history = train_one_seed(
-            seed=seed,
+    if args.model_type == "mlp":
+        for seed in range(args.n_seeds):
+            model, val_rmse, history = train_one_seed(
+                seed=seed,
+                train_x_raw=train_x_raw,
+                train_y_raw=train_y_raw,
+                val_x_raw=val_x_raw,
+                val_y_raw=val_y_raw,
+                norm=norm,
+                in_dim=args.in_dim,
+                h1=args.h1,
+                h2=args.h2,
+                out_dim=args.out_dim,
+                epochs=args.epochs,
+                lr=args.lr,
+                batch_size=args.batch_size,
+                print_every=args.print_every,
+                device=device,
+            )
+            history_by_seed[seed] = history
+
+            if val_rmse < best_val_rmse:
+                best_val_rmse = val_rmse
+                best_model = model.cpu()
+                best_seed = seed
+                print(f"--> New best model at seed {seed}")
+    else:
+        model, val_rmse, history, best_iteration = train_xgboost(
             train_x_raw=train_x_raw,
             train_y_raw=train_y_raw,
             val_x_raw=val_x_raw,
             val_y_raw=val_y_raw,
             norm=norm,
-            in_dim=args.in_dim,
-            h1=args.h1,
-            h2=args.h2,
-            out_dim=args.out_dim,
-            epochs=args.epochs,
+            n_estimators=args.xgb_n_estimators,
+            max_depth=args.xgb_max_depth,
             lr=args.lr,
-            batch_size=args.batch_size,
             print_every=args.print_every,
+            seed=0,
             device=device,
         )
-        history_by_seed[seed] = history
-
-        if val_rmse < best_val_rmse:
-            best_val_rmse = val_rmse
-            best_model = model.cpu()
-            best_seed = seed
-            print(f"--> New best model at seed {seed}")
+        best_val_rmse = val_rmse
+        best_model = model
+        best_seed = 0
+        history_by_seed[best_seed] = history
+        print(f"--> New best XGBoost model at round {best_iteration - 1}")
 
     assert best_model is not None
     assert best_seed is not None
@@ -759,33 +913,47 @@ def main() -> None:
     print("========================================")
 
     eval_device = torch.device("cpu")
-    split_predictions = {
-        "train": (
-            train_y_raw,
-            predict_raw(best_model, train_x_raw, norm, eval_device, args.batch_size),
-        ),
-        "validation": (
-            val_y_raw,
-            predict_raw(best_model, val_x_raw, norm, eval_device, args.batch_size),
-        ),
-        "test": (
-            test_y_raw,
-            predict_raw(best_model, test_x_raw, norm, eval_device, args.batch_size),
-        ),
-    }
+    if args.model_type == "mlp":
+        split_predictions = {
+            "train": (
+                train_y_raw,
+                predict_raw(best_model, train_x_raw, norm, eval_device, args.batch_size),
+            ),
+            "validation": (
+                val_y_raw,
+                predict_raw(best_model, val_x_raw, norm, eval_device, args.batch_size),
+            ),
+            "test": (
+                test_y_raw,
+                predict_raw(best_model, test_x_raw, norm, eval_device, args.batch_size),
+            ),
+        }
+    else:
+        split_predictions = {
+            "train": (
+                train_y_raw,
+                predict_xgboost_raw(best_model, train_x_raw, norm, iteration=best_iteration),
+            ),
+            "validation": (
+                val_y_raw,
+                predict_xgboost_raw(best_model, val_x_raw, norm, iteration=best_iteration),
+            ),
+            "test": (
+                test_y_raw,
+                predict_xgboost_raw(best_model, test_x_raw, norm, iteration=best_iteration),
+            ),
+        }
 
     print_accuracy_metrics("Train", compute_accuracy_metrics(*split_predictions["train"]))
     print_accuracy_metrics("Validation", compute_accuracy_metrics(*split_predictions["validation"]))
     print_accuracy_metrics("Test", compute_accuracy_metrics(*split_predictions["test"]))
 
-    print_samples(best_model, test_data, norm, torch.device("cpu"), n_samples=5)
+    print_sample_predictions(test_data, split_predictions["test"][1], n_samples=5)
     save_accuracy_outputs(args.plots_dir, split_predictions, history_by_seed, best_seed, test_x_raw)
 
-    checkpoint = {
-        "state_dict": best_model.state_dict(),
+    common_metadata = {
+        "model_type": args.model_type,
         "in_dim": args.in_dim,
-        "h1": args.h1,
-        "h2": args.h2,
         "out_dim": args.out_dim,
         "normalization": norm.mode,
         "x_mean": norm.x_mean.astype(np.float64),
@@ -795,10 +963,29 @@ def main() -> None:
         "x_floor": norm.x_floor.astype(np.float64),
         "y_floor": norm.y_floor.astype(np.float64),
     }
-    torch.save(checkpoint, args.checkpoint)
-    print(f"Saved PyTorch checkpoint to {args.checkpoint}")
-
-    export_to_cpp_text(best_model, norm, args.model_file)
+    if args.model_type == "mlp":
+        checkpoint = {
+            **common_metadata,
+            "state_dict": best_model.state_dict(),
+            "h1": args.h1,
+            "h2": args.h2,
+        }
+        torch.save(checkpoint, args.checkpoint)
+        print(f"Saved PyTorch checkpoint to {args.checkpoint}")
+        export_to_cpp_text(best_model, norm, args.model_file)
+    else:
+        best_model.save_model(args.xgb_model_file)
+        checkpoint = {
+            **common_metadata,
+            "xgb_model_file": args.xgb_model_file,
+            "xgb_n_estimators": args.xgb_n_estimators,
+            "xgb_max_depth": args.xgb_max_depth,
+            "best_iteration": best_iteration,
+        }
+        torch.save(checkpoint, args.checkpoint)
+        print(f"Saved XGBoost model to {args.xgb_model_file}")
+        print(f"Saved XGBoost metadata checkpoint to {args.checkpoint}")
+        print("Skipped C++ text export: friction_emulator.txt is currently an MLP-only format.")
     print("\nDone.")
 
 
