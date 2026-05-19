@@ -1,4 +1,4 @@
 *.csv
+!data/weertman_rank_0.csv
 *.sh
 __pycache__/
-data/*
