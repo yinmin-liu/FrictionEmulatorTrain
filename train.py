@@ -647,7 +647,7 @@ def main() -> None:
     print_accuracy_metrics("Test", compute_accuracy_metrics(*split_predictions["test"]))
 
     print_samples(best_model, test_data, x_mean, x_std, y_mean, y_std, torch.device("cpu"), n_samples=5)
-    save_accuracy_outputs(args.plots_dir, split_predictions, history_by_seed, best_seed)
+    save_accuracy_outputs(args.plots_dir, split_predictions, history_by_seed, best_seed, test_x_raw)
 
     checkpoint = {
         "state_dict": best_model.state_dict(),

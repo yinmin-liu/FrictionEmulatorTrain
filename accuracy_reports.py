@@ -76,6 +76,47 @@ def print_accuracy_metrics(name: str, metrics: Dict[str, float]) -> None:
     )
 
 
+def infer_m_values(
+    x_raw: np.ndarray,
+    alpha2_pred: np.ndarray,
+    denominator_tol: float = 1e-12,
+) -> np.ndarray:
+    c2 = x_raw[:, 0].reshape(-1)
+    vmag = x_raw[:, 1].reshape(-1)
+    alpha2 = alpha2_pred.reshape(-1)
+
+    positive = (c2 > 0.0) & (vmag > 0.0) & (alpha2 > 0.0)
+    m_values = np.full_like(alpha2, np.nan, dtype=np.float64)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_vmag = np.log(vmag[positive])
+        denominator = np.log(alpha2[positive] / c2[positive]) + log_vmag
+        valid_denominator = np.abs(denominator) > denominator_tol
+        inferred = np.full_like(log_vmag, np.nan, dtype=np.float64)
+        inferred[valid_denominator] = log_vmag[valid_denominator] / denominator[valid_denominator]
+        m_values[positive] = inferred
+
+    return m_values[np.isfinite(m_values)]
+
+
+def print_m_summary(m_values: np.ndarray, total_count: int) -> None:
+    valid_count = len(m_values)
+    skipped_count = total_count - valid_count
+    if valid_count == 0:
+        print("Inferred m: no valid test predictions for m diagnostic")
+        return
+    print(
+        "Inferred m "
+        f"valid={valid_count}/{total_count}"
+        f"  skipped={skipped_count}"
+        f"  mean={fmt_sci(float(np.mean(m_values)))}"
+        f"  median={fmt_sci(float(np.median(m_values)))}"
+        f"  std={fmt_sci(float(np.std(m_values)))}"
+        f"  min={fmt_sci(float(np.min(m_values)))}"
+        f"  max={fmt_sci(float(np.max(m_values)))}"
+    )
+
+
 def _svg_scale(value: float, src_min: float, src_max: float, dst_min: float, dst_max: float) -> float:
     if src_max == src_min:
         return 0.5 * (dst_min + dst_max)
@@ -97,6 +138,7 @@ def save_accuracy_svgs(
     split_predictions: Dict[str, Tuple[np.ndarray, np.ndarray]],
     history_by_seed: Dict[int, List[Dict[str, float]]],
     best_seed: int,
+    test_x_raw: np.ndarray,
 ) -> None:
     colors = {"train": "#1f77b4", "validation": "#ff7f0e", "test": "#2ca02c"}
     width, height = 760, 620
@@ -193,6 +235,33 @@ def save_accuracy_svgs(
     loss_path = out_dir / "loss_curves.svg"
     _write_svg(loss_path, width, height, body)
 
+    _, test_pred = split_predictions["test"]
+    m_values = infer_m_values(test_x_raw, test_pred)
+    print_m_summary(m_values, len(test_pred))
+    if len(m_values) > 0:
+        counts, edges = np.histogram(m_values, bins=60)
+        max_count = max(int(np.max(counts)), 1)
+        body = [
+            f'<text x="{width / 2}" y="28" text-anchor="middle" font-family="Arial" font-size="20">Inferred m Histogram (test)</text>',
+            f'<rect x="{left}" y="{top}" width="{plot_w}" height="{plot_h}" fill="none" stroke="#333"/>',
+        ]
+        for count, x0, x1 in zip(counts, edges[:-1], edges[1:]):
+            x = _svg_scale(float(x0), float(edges[0]), float(edges[-1]), left, left + plot_w)
+            x_next = _svg_scale(float(x1), float(edges[0]), float(edges[-1]), left, left + plot_w)
+            bar_h = _svg_scale(float(count), 0.0, float(max_count), 0.0, plot_h)
+            body.append(
+                f'<rect x="{x:.2f}" y="{top + plot_h - bar_h:.2f}" width="{max(x_next - x - 1, 1):.2f}" height="{bar_h:.2f}" fill="#9467bd" opacity="0.85"/>'
+            )
+        body.extend(
+            [
+                f'<text x="{left + plot_w / 2}" y="{height - 28}" text-anchor="middle" font-family="Arial" font-size="15">m = ln(vmag) / (ln(alpha2/C2) + ln(vmag))</text>',
+                f'<text x="24" y="{top + plot_h / 2}" text-anchor="middle" transform="rotate(-90 24 {top + plot_h / 2})" font-family="Arial" font-size="15">Count</text>',
+            ]
+        )
+        m_path = out_dir / "inferred_m_histogram.svg"
+        _write_svg(m_path, width, height, body)
+        print(f"Saved inferred m histogram to {m_path}")
+
     print(f"Saved prediction scatter to {scatter_path}")
     print(f"Saved test error histogram to {hist_path}")
     print(f"Saved loss curves to {loss_path}")
@@ -203,6 +272,7 @@ def save_accuracy_outputs(
     split_predictions: Dict[str, Tuple[np.ndarray, np.ndarray]],
     history_by_seed: Dict[int, List[Dict[str, float]]],
     best_seed: int,
+    test_x_raw: np.ndarray,
 ) -> None:
     out_dir = Path(plots_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -217,7 +287,7 @@ def save_accuracy_outputs(
             "matplotlib is not installed; saving lightweight SVG plots instead. "
             "Install it with `python3 -m pip install matplotlib` for PNG output."
         )
-        save_accuracy_svgs(out_dir, split_predictions, history_by_seed, best_seed)
+        save_accuracy_svgs(out_dir, split_predictions, history_by_seed, best_seed, test_x_raw)
         return
 
     plt.figure(figsize=(7, 6))
@@ -272,6 +342,21 @@ def save_accuracy_outputs(
     loss_path = out_dir / "loss_curves.png"
     plt.savefig(loss_path, dpi=200)
     plt.close()
+
+    _, test_pred = split_predictions["test"]
+    m_values = infer_m_values(test_x_raw, test_pred)
+    print_m_summary(m_values, len(test_pred))
+    if len(m_values) > 0:
+        plt.figure(figsize=(7, 5))
+        plt.hist(m_values, bins=60, alpha=0.85)
+        plt.xlabel("m = ln(vmag) / (ln(alpha2/C2) + ln(vmag))")
+        plt.ylabel("Count")
+        plt.title("Inferred m Histogram (test)")
+        plt.tight_layout()
+        m_path = out_dir / "inferred_m_histogram.png"
+        plt.savefig(m_path, dpi=200)
+        plt.close()
+        print(f"Saved inferred m histogram to {m_path}")
 
     print(f"Saved prediction scatter to {scatter_path}")
     print(f"Saved test error histogram to {hist_path}")
