@@ -433,11 +433,14 @@ def predict_raw(
 
 
 def predict_xgboost_raw(model, x_raw: np.ndarray, norm: NormalizationConfig, iteration: int | None = None) -> np.ndarray:
+    import xgboost as xgb
+
     x_norm = normalize_x_np(x_raw, norm).astype(np.float32)
+    dmat = xgb.DMatrix(x_norm)
     kwargs = {}
     if iteration is not None:
         kwargs["iteration_range"] = (0, iteration)
-    pred_norm = np.asarray(model.predict(x_norm, **kwargs), dtype=np.float64).reshape(-1, len(norm.y_mean))
+    pred_norm = np.asarray(model.predict(dmat, **kwargs), dtype=np.float64).reshape(-1, len(norm.y_mean))
     return denormalize_y_np(pred_norm, norm)
 
 
@@ -692,7 +695,7 @@ def train_xgboost(
     device: torch.device,
 ):
     try:
-        from xgboost import XGBRegressor
+        import xgboost as xgb
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "XGBoost is not installed. Install it or run with --model-type mlp."
@@ -704,28 +707,29 @@ def train_xgboost(
     val_y = normalize_y_np(val_y_raw, norm).astype(np.float32).reshape(-1)
 
     xgb_device = "cuda" if device.type == "cuda" else "cpu"
-    model = XGBRegressor(
-        n_estimators=n_estimators,
-        max_depth=max_depth,
-        learning_rate=lr,
-        objective="reg:squarederror",
-        tree_method="hist",
-        device=xgb_device,
-        subsample=1.0,
-        colsample_bytree=1.0,
-        random_state=seed,
-        n_jobs=0,
-        eval_metric="rmse",
-    )
+    params = {
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "max_depth": max_depth,
+        "eta": lr,
+        "tree_method": "hist",
+        "device": xgb_device,
+        "subsample": 1.0,
+        "colsample_bytree": 1.0,
+        "seed": seed,
+    }
+    dtrain = xgb.DMatrix(train_x, label=train_y)
+    dval = xgb.DMatrix(val_x, label=val_y)
 
     print("\n==============================")
     print("XGBoost")
     print("==============================")
-    model.fit(
-        train_x,
-        train_y,
-        eval_set=[(train_x, train_y), (val_x, val_y)],
-        verbose=False,
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=n_estimators,
+        evals=[(dtrain, "train"), (dval, "validation")],
+        verbose_eval=False,
     )
 
     history = []
