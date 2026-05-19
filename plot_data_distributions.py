@@ -152,6 +152,7 @@ def plot_hist_grid(
         ax.hist(values, bins=bins, alpha=0.85)
         ax.set_xlabel(xlabels[i])
         ax.set_ylabel("count")
+        ax.set_yscale("log")
         ax.grid(alpha=0.2)
     fig.tight_layout()
     fig.savefig(path, dpi=300, bbox_inches="tight")
