@@ -44,7 +44,6 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from accuracy_reports import (
     compute_accuracy_metrics,
-    predict_raw,
     print_accuracy_metrics,
     save_accuracy_outputs,
 )
@@ -54,6 +53,17 @@ FIXED_X_MEAN = np.array([9.05e6, 2.08e-5], dtype=np.float64)
 FIXED_X_STD = np.array([6.61e6, 4.67e-5], dtype=np.float64)
 FIXED_Y_MEAN = np.array([2.09e11], dtype=np.float64)
 FIXED_Y_STD = np.array([1.18e12], dtype=np.float64)
+
+
+@dataclass
+class NormalizationConfig:
+    mode: str
+    x_mean: np.ndarray
+    x_std: np.ndarray
+    y_mean: np.ndarray
+    y_std: np.ndarray
+    x_floor: np.ndarray
+    y_floor: np.ndarray
 
 
 # -----------------------------------------------------------------------------
@@ -218,6 +228,73 @@ def to_numpy(data: List[FrictionSample]) -> Tuple[np.ndarray, np.ndarray]:
     return x, y
 
 
+def build_normalization_config(
+    mode: str,
+    train_x_raw: np.ndarray,
+    train_y_raw: np.ndarray,
+    x_floor: np.ndarray,
+    y_floor: np.ndarray,
+) -> NormalizationConfig:
+    if mode == "raw":
+        return NormalizationConfig(
+            mode=mode,
+            x_mean=FIXED_X_MEAN.copy(),
+            x_std=FIXED_X_STD.copy(),
+            y_mean=FIXED_Y_MEAN.copy(),
+            y_std=FIXED_Y_STD.copy(),
+            x_floor=x_floor.astype(np.float64),
+            y_floor=y_floor.astype(np.float64),
+        )
+
+    if mode != "log":
+        raise RuntimeError(f"Unsupported normalization mode: {mode}")
+
+    x_trans = transform_x_np(train_x_raw, mode, x_floor)
+    y_trans = transform_y_np(train_y_raw, mode, y_floor)
+    x_mean = x_trans.mean(axis=0)
+    x_std = x_trans.std(axis=0)
+    y_mean = y_trans.mean(axis=0)
+    y_std = y_trans.std(axis=0)
+    x_std[x_std < 1e-12] = 1.0
+    y_std[y_std < 1e-12] = 1.0
+    return NormalizationConfig(
+        mode=mode,
+        x_mean=x_mean.astype(np.float64),
+        x_std=x_std.astype(np.float64),
+        y_mean=y_mean.astype(np.float64),
+        y_std=y_std.astype(np.float64),
+        x_floor=x_floor.astype(np.float64),
+        y_floor=y_floor.astype(np.float64),
+    )
+
+
+def transform_x_np(x_raw: np.ndarray, mode: str, x_floor: np.ndarray) -> np.ndarray:
+    x = np.asarray(x_raw, dtype=np.float64)
+    if mode == "raw":
+        return x
+    return np.log(np.maximum(x, x_floor))
+
+
+def transform_y_np(y_raw: np.ndarray, mode: str, y_floor: np.ndarray) -> np.ndarray:
+    y = np.asarray(y_raw, dtype=np.float64)
+    if mode == "raw":
+        return y
+    return np.log(np.maximum(y, y_floor))
+
+
+def transform_x_torch(x_raw: torch.Tensor, norm: NormalizationConfig, device: torch.device) -> torch.Tensor:
+    if norm.mode == "raw":
+        return x_raw
+    x_floor = torch.as_tensor(norm.x_floor, dtype=torch.float32, device=device)
+    return torch.log(torch.maximum(x_raw, x_floor))
+
+
+def inverse_transform_y_torch(y_trans: torch.Tensor, norm: NormalizationConfig) -> torch.Tensor:
+    if norm.mode == "raw":
+        return y_trans
+    return torch.exp(y_trans)
+
+
 # -----------------------------------------------------------------------------
 # Model
 # -----------------------------------------------------------------------------
@@ -251,10 +328,7 @@ def compute_rmse(
     model: nn.Module,
     x_raw: np.ndarray,
     y_raw: np.ndarray,
-    x_mean: np.ndarray,
-    x_std: np.ndarray,
-    y_mean: np.ndarray,
-    y_std: np.ndarray,
+    norm: NormalizationConfig,
     device: torch.device,
     batch_size: int,
 ) -> float:
@@ -262,19 +336,21 @@ def compute_rmse(
     total_sse = 0.0
     total_count = 0
 
-    x_mean_t = torch.as_tensor(x_mean, dtype=torch.float32, device=device)
-    x_std_t = torch.as_tensor(x_std, dtype=torch.float32, device=device)
-    y_mean_t = torch.as_tensor(y_mean, dtype=torch.float32, device=device)
-    y_std_t = torch.as_tensor(y_std, dtype=torch.float32, device=device)
+    x_mean_t = torch.as_tensor(norm.x_mean, dtype=torch.float32, device=device)
+    x_std_t = torch.as_tensor(norm.x_std, dtype=torch.float32, device=device)
+    y_mean_t = torch.as_tensor(norm.y_mean, dtype=torch.float32, device=device)
+    y_std_t = torch.as_tensor(norm.y_std, dtype=torch.float32, device=device)
 
     for start in range(0, len(x_raw), batch_size):
         end = min(start + batch_size, len(x_raw))
         xb_raw = torch.as_tensor(x_raw[start:end], dtype=torch.float32, device=device)
         yb_raw = torch.as_tensor(y_raw[start:end], dtype=torch.float32, device=device)
 
-        xb = (xb_raw - x_mean_t) / x_std_t
+        xb_trans = transform_x_torch(xb_raw, norm, device)
+        xb = (xb_trans - x_mean_t) / x_std_t
         pred_norm = model(xb)
-        pred_raw = pred_norm * y_std_t + y_mean_t
+        pred_trans = pred_norm * y_std_t + y_mean_t
+        pred_raw = inverse_transform_y_torch(pred_trans, norm)
 
         err = pred_raw - yb_raw
         total_sse += torch.sum(err * err).item()
@@ -284,13 +360,38 @@ def compute_rmse(
 
 
 @torch.no_grad()
+def predict_raw(
+    model: nn.Module,
+    x_raw: np.ndarray,
+    norm: NormalizationConfig,
+    device: torch.device,
+    batch_size: int,
+) -> np.ndarray:
+    model.eval()
+    preds = []
+
+    x_mean_t = torch.as_tensor(norm.x_mean, dtype=torch.float32, device=device)
+    x_std_t = torch.as_tensor(norm.x_std, dtype=torch.float32, device=device)
+    y_mean_t = torch.as_tensor(norm.y_mean, dtype=torch.float32, device=device)
+    y_std_t = torch.as_tensor(norm.y_std, dtype=torch.float32, device=device)
+
+    for start in range(0, len(x_raw), batch_size):
+        end = min(start + batch_size, len(x_raw))
+        xb_raw = torch.as_tensor(x_raw[start:end], dtype=torch.float32, device=device)
+        xb_trans = transform_x_torch(xb_raw, norm, device)
+        xb = (xb_trans - x_mean_t) / x_std_t
+        pred_trans = model(xb) * y_std_t + y_mean_t
+        pred_raw = inverse_transform_y_torch(pred_trans, norm)
+        preds.append(pred_raw.detach().cpu().numpy())
+
+    return np.concatenate(preds, axis=0)
+
+
+@torch.no_grad()
 def print_samples(
     model: nn.Module,
     data: List[FrictionSample],
-    x_mean: np.ndarray,
-    x_std: np.ndarray,
-    y_mean: np.ndarray,
-    y_std: np.ndarray,
+    norm: NormalizationConfig,
     device: torch.device,
     n_samples: int = 5,
 ) -> None:
@@ -300,13 +401,14 @@ def print_samples(
     for i, samp in enumerate(data[:n_samples]):
         x_input = np.asarray([samp.x], dtype=np.float32)
         x_raw = torch.as_tensor(x_input, dtype=torch.float32, device=device)
-        x_norm = (x_raw - torch.tensor(x_mean, dtype=torch.float32, device=device)) / torch.tensor(
-            x_std, dtype=torch.float32, device=device
-        )
-        pred = (
-            model(x_norm) * torch.tensor(y_std, dtype=torch.float32, device=device)
-            + torch.tensor(y_mean, dtype=torch.float32, device=device)
-        ).cpu().numpy()[0]
+        x_mean_t = torch.as_tensor(norm.x_mean, dtype=torch.float32, device=device)
+        x_std_t = torch.as_tensor(norm.x_std, dtype=torch.float32, device=device)
+        y_mean_t = torch.as_tensor(norm.y_mean, dtype=torch.float32, device=device)
+        y_std_t = torch.as_tensor(norm.y_std, dtype=torch.float32, device=device)
+        x_trans = transform_x_torch(x_raw, norm, device)
+        x_norm = (x_trans - x_mean_t) / x_std_t
+        pred_trans = model(x_norm) * y_std_t + y_mean_t
+        pred = inverse_transform_y_torch(pred_trans, norm).cpu().numpy()[0]
 
         msg = f"  Sample {i}  inputs: {fmt_seq(samp.x)}"
         for j, true_val in enumerate(samp.y):
@@ -325,10 +427,7 @@ def print_samples(
 # -----------------------------------------------------------------------------
 def export_to_cpp_text(
     model: FrictionMLP,
-    x_mean: np.ndarray,
-    x_std: np.ndarray,
-    y_mean: np.ndarray,
-    y_std: np.ndarray,
+    norm: NormalizationConfig,
     out_file: str,
 ) -> None:
     layers = [m for m in model.net if isinstance(m, nn.Linear)]
@@ -345,13 +444,20 @@ def export_to_cpp_text(
         f.write(f"H1 {h1}\n")
         f.write(f"H2 {h2}\n")
         f.write(f"OUT {out_dim}\n")
+        if norm.mode != "raw":
+            f.write(f"NORMALIZATION {norm.mode}\n")
+            f.write("LOG_BASE e\n")
+            for j in range(in_dim):
+                f.write(f"x_floor {float(norm.x_floor[j]):.17g}\n")
+            for j in range(out_dim):
+                f.write(f"y_floor {float(norm.y_floor[j]):.17g}\n")
 
         for j in range(in_dim):
-            f.write(f"x_mean {float(x_mean[j]):.17g}\n")
-            f.write(f"x_std {float(x_std[j]):.17g}\n")
+            f.write(f"x_mean {float(norm.x_mean[j]):.17g}\n")
+            f.write(f"x_std {float(norm.x_std[j]):.17g}\n")
         for j in range(out_dim):
-            f.write(f"y_mean {float(y_mean[j]):.17g}\n")
-            f.write(f"y_std {float(y_std[j]):.17g}\n")
+            f.write(f"y_mean {float(norm.y_mean[j]):.17g}\n")
+            f.write(f"y_std {float(norm.y_std[j]):.17g}\n")
 
         def write_linear(tag_w: str, tag_b: str, layer: nn.Linear) -> None:
             w = layer.weight.detach().cpu().numpy()
@@ -378,10 +484,7 @@ def train_one_seed(
     train_y_raw: np.ndarray,
     val_x_raw: np.ndarray,
     val_y_raw: np.ndarray,
-    x_mean: np.ndarray,
-    x_std: np.ndarray,
-    y_mean: np.ndarray,
-    y_std: np.ndarray,
+    norm: NormalizationConfig,
     in_dim: int,
     h1: int,
     h2: int,
@@ -398,8 +501,8 @@ def train_one_seed(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
-    train_x = (train_x_raw - x_mean) / x_std
-    train_y = (train_y_raw - y_mean) / y_std
+    train_x = (transform_x_np(train_x_raw, norm.mode, norm.x_floor) - norm.x_mean) / norm.x_std
+    train_y = (transform_y_np(train_y_raw, norm.mode, norm.y_floor) - norm.y_mean) / norm.y_std
 
     train_ds = TensorDataset(
         torch.from_numpy(train_x.astype(np.float32)),
@@ -427,8 +530,6 @@ def train_one_seed(
     print(f"Seed {seed}")
     print("==============================")
 
-    y_std_scalar = float(y_std[0]) if len(y_std) == 1 else None
-
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
@@ -448,20 +549,20 @@ def train_one_seed(
             total_count += xb.shape[0]
 
         if epoch % print_every == 0 or epoch == epochs - 1:
-            train_rmse_norm = math.sqrt(total_loss / max(total_count, 1))
-            if y_std_scalar is not None:
-                train_rmse = train_rmse_norm * y_std_scalar
-            else:
-                train_rmse = train_rmse_norm
+            train_rmse = compute_rmse(
+                model,
+                train_x_raw,
+                train_y_raw,
+                norm,
+                device,
+                batch_size=batch_size,
+            )
 
             val_rmse = compute_rmse(
                 model,
                 val_x_raw,
                 val_y_raw,
-                x_mean,
-                x_std,
-                y_mean,
-                y_std,
+                norm,
                 device,
                 batch_size=batch_size,
             )
@@ -491,10 +592,7 @@ def train_one_seed(
         model,
         val_x_raw,
         val_y_raw,
-        x_mean,
-        x_std,
-        y_mean,
-        y_std,
+        norm,
         device,
         batch_size=batch_size,
     )
@@ -522,6 +620,10 @@ def main() -> None:
     parser.add_argument("--print-every", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--plots-dir", type=str, default="./plots")
+    parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log"])
+    parser.add_argument("--log-c2-floor", type=float, default=1e-30)
+    parser.add_argument("--log-v-floor", type=float, default=1e-12)
+    parser.add_argument("--log-alpha2-floor", type=float, default=1e-30)
     args = parser.parse_args()
 
     if args.device == "auto":
@@ -550,6 +652,7 @@ def main() -> None:
     print(f"Model file:   {args.model_file}")
     print(f"Checkpoint:   {args.checkpoint}")
     print(f"Plots dir:    {args.plots_dir}")
+    print(f"Normalization:{args.normalization}")
     print(
         f"Architecture: {args.in_dim} -> {args.h1} ->"
         f" {args.h2} -> {args.out_dim}"
@@ -571,19 +674,20 @@ def main() -> None:
             f"Expected out_dim={len(FIXED_Y_MEAN)} for hard-coded normalization, got {args.out_dim}"
         )
 
-    x_mean = FIXED_X_MEAN.copy()
-    x_std = FIXED_X_STD.copy()
-    y_mean = FIXED_Y_MEAN.copy()
-    y_std = FIXED_Y_STD.copy()
-
-    print(f"x_mean:       {fmt_seq(x_mean.tolist())}")
-    print(f"x_std:        {fmt_seq(x_std.tolist())}")
-    print(f"y_mean:       {fmt_seq(y_mean.tolist())}")
-    print(f"y_std:        {fmt_seq(y_std.tolist())}")
-
     train_x_raw, train_y_raw = to_numpy(train_data)
     val_x_raw, val_y_raw = to_numpy(val_data)
     test_x_raw, test_y_raw = to_numpy(test_data)
+    x_floor = np.array([args.log_c2_floor, args.log_v_floor], dtype=np.float64)
+    y_floor = np.array([args.log_alpha2_floor], dtype=np.float64)
+    norm = build_normalization_config(args.normalization, train_x_raw, train_y_raw, x_floor, y_floor)
+
+    print(f"x_mean:       {fmt_seq(norm.x_mean.tolist())}")
+    print(f"x_std:        {fmt_seq(norm.x_std.tolist())}")
+    print(f"y_mean:       {fmt_seq(norm.y_mean.tolist())}")
+    print(f"y_std:        {fmt_seq(norm.y_std.tolist())}")
+    if norm.mode == "log":
+        print(f"x_floor:      {fmt_seq(norm.x_floor.tolist())}")
+        print(f"y_floor:      {fmt_seq(norm.y_floor.tolist())}")
 
     best_model = None
     best_val_rmse = float("inf")
@@ -597,10 +701,7 @@ def main() -> None:
             train_y_raw=train_y_raw,
             val_x_raw=val_x_raw,
             val_y_raw=val_y_raw,
-            x_mean=x_mean,
-            x_std=x_std,
-            y_mean=y_mean,
-            y_std=y_std,
+            norm=norm,
             in_dim=args.in_dim,
             h1=args.h1,
             h2=args.h2,
@@ -630,15 +731,15 @@ def main() -> None:
     split_predictions = {
         "train": (
             train_y_raw,
-            predict_raw(best_model, train_x_raw, x_mean, x_std, y_mean, y_std, eval_device, args.batch_size),
+            predict_raw(best_model, train_x_raw, norm, eval_device, args.batch_size),
         ),
         "validation": (
             val_y_raw,
-            predict_raw(best_model, val_x_raw, x_mean, x_std, y_mean, y_std, eval_device, args.batch_size),
+            predict_raw(best_model, val_x_raw, norm, eval_device, args.batch_size),
         ),
         "test": (
             test_y_raw,
-            predict_raw(best_model, test_x_raw, x_mean, x_std, y_mean, y_std, eval_device, args.batch_size),
+            predict_raw(best_model, test_x_raw, norm, eval_device, args.batch_size),
         ),
     }
 
@@ -646,7 +747,7 @@ def main() -> None:
     print_accuracy_metrics("Validation", compute_accuracy_metrics(*split_predictions["validation"]))
     print_accuracy_metrics("Test", compute_accuracy_metrics(*split_predictions["test"]))
 
-    print_samples(best_model, test_data, x_mean, x_std, y_mean, y_std, torch.device("cpu"), n_samples=5)
+    print_samples(best_model, test_data, norm, torch.device("cpu"), n_samples=5)
     save_accuracy_outputs(args.plots_dir, split_predictions, history_by_seed, best_seed, test_x_raw)
 
     checkpoint = {
@@ -655,15 +756,18 @@ def main() -> None:
         "h1": args.h1,
         "h2": args.h2,
         "out_dim": args.out_dim,
-        "x_mean": x_mean.astype(np.float64),
-        "x_std": x_std.astype(np.float64),
-        "y_mean": y_mean.astype(np.float64),
-        "y_std": y_std.astype(np.float64),
+        "normalization": norm.mode,
+        "x_mean": norm.x_mean.astype(np.float64),
+        "x_std": norm.x_std.astype(np.float64),
+        "y_mean": norm.y_mean.astype(np.float64),
+        "y_std": norm.y_std.astype(np.float64),
+        "x_floor": norm.x_floor.astype(np.float64),
+        "y_floor": norm.y_floor.astype(np.float64),
     }
     torch.save(checkpoint, args.checkpoint)
     print(f"Saved PyTorch checkpoint to {args.checkpoint}")
 
-    export_to_cpp_text(best_model, x_mean, x_std, y_mean, y_std, args.model_file)
+    export_to_cpp_text(best_model, norm, args.model_file)
     print("\nDone.")
 
 
