@@ -1,8 +1,8 @@
 torchrun --nproc_per_node=1 train.py \
 	--h1 32 --h2 32 \
     --n-ranks 10 \
-    --epochs 1000 \
-    --lr 3e-3\
+    --epochs 2000 \
+    --lr 1e-3\
     --batch-size 16384 \
     --n-seeds 1 \
 	 --print-every 50 \
