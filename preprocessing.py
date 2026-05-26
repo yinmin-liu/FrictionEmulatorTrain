@@ -191,3 +191,34 @@ def target_balanced_sample_indices(
     rng = np.random.default_rng(seed)
     probabilities = sample_weights / sample_weights.sum()
     return rng.choice(len(target), size=n_samples, replace=True, p=probabilities)
+
+
+def target_balanced_sample_weights(
+    target: np.ndarray,
+    n_bins: int,
+    balance_power: float,
+    max_weight: float,
+) -> np.ndarray:
+    finite_target = target[np.isfinite(target)]
+    if len(finite_target) == 0:
+        raise RuntimeError("Target has no finite values for balanced sampling.")
+
+    edges = np.linspace(float(finite_target.min()), float(finite_target.max()), n_bins + 1)
+    bin_ids = np.digitize(target, edges[1:-1], right=False)
+    counts = np.bincount(bin_ids, minlength=n_bins).astype(np.float64)
+    occupied = counts > 0
+    if not np.any(occupied):
+        raise RuntimeError("No occupied target bins were found for balanced sampling.")
+
+    bin_weights = np.zeros(n_bins, dtype=np.float64)
+    bin_weights[occupied] = counts[occupied] ** (-balance_power)
+    median_weight = np.median(bin_weights[occupied])
+    if median_weight > 0.0:
+        bin_weights[occupied] /= median_weight
+    bin_weights[occupied] = np.minimum(bin_weights[occupied], max_weight)
+
+    sample_weights = bin_weights[bin_ids]
+    sample_weights = np.where(np.isfinite(target), sample_weights, 0.0)
+    if sample_weights.sum() <= 0.0:
+        raise RuntimeError("Balanced sampling weights sum to zero.")
+    return sample_weights.astype(np.float64)

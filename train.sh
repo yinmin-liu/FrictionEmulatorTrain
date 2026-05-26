@@ -10,4 +10,9 @@ torchrun --nproc_per_node=1 train.py \
     --model-file ./friction_emulator.txt \
     --checkpoint ./friction_emulator.pt \
 	 --device auto \
-	 --normalization sqrt
+	 --normalization sqrt \
+	 --sampling target-balanced \
+	 --balanced-target-bins 20 \
+	 --balanced-power 0.5 \
+	 --balanced-max-weight 20 \
+	 --sampling-target-transform sqrt

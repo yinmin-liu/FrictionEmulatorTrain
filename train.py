@@ -40,7 +40,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 from accuracy_reports import (
     compute_accuracy_metrics,
@@ -56,6 +56,7 @@ from preprocessing import (
     inverse_transform_y_torch,
     normalize_x_np,
     normalize_y_np,
+    target_balanced_sample_weights,
     transform_x_np,
     transform_x_torch,
     transform_y_np,
@@ -92,6 +93,21 @@ def fmt_seq(values: List[float]) -> str:
 
 def fmt_percent(value: float) -> str:
     return f"{float(value):.6f}"
+
+
+def transform_sampling_target(
+    y_raw: np.ndarray,
+    mode: str,
+    y_floor: np.ndarray,
+) -> np.ndarray:
+    y = np.asarray(y_raw, dtype=np.float64).reshape(len(y_raw), -1)
+    if mode == "raw":
+        return y[:, 0]
+    if mode == "sqrt":
+        return np.sqrt(np.maximum(y[:, 0], 0.0))
+    if mode == "log":
+        return np.log(np.maximum(y[:, 0], y_floor[0]))
+    raise RuntimeError(f"Unsupported sampling target transform: {mode}")
 
 
 def describe_device(device: torch.device) -> str:
@@ -464,6 +480,11 @@ def train_one_seed(
     lr: float,
     batch_size: int,
     print_every: int,
+    sampling: str,
+    balanced_target_bins: int,
+    balanced_power: float,
+    balanced_max_weight: float,
+    sampling_target_transform: str,
     device: torch.device,
 ) -> Tuple[FrictionMLP, float, List[Dict[str, float]]]:
     set_seed(seed)
@@ -483,14 +504,43 @@ def train_one_seed(
     g = torch.Generator()
     g.manual_seed(seed)
 
+    sampler = None
+    shuffle = True
+    if sampling == "target-balanced":
+        target = transform_sampling_target(train_y_raw, sampling_target_transform, norm.y_floor)
+        sample_weights = target_balanced_sample_weights(
+            target,
+            n_bins=balanced_target_bins,
+            balance_power=balanced_power,
+            max_weight=balanced_max_weight,
+        )
+        sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(sample_weights, dtype=torch.double),
+            num_samples=len(sample_weights),
+            replacement=True,
+            generator=g,
+        )
+        shuffle = False
+        print(
+            "Target-balanced sampler:"
+            f" target={sampling_target_transform}(alpha2)"
+            f" bins={balanced_target_bins}"
+            f" power={balanced_power:g}"
+            f" max_weight={balanced_max_weight:g}"
+            f" weight_min={sample_weights.min():.3g}"
+            f" weight_median={np.median(sample_weights):.3g}"
+            f" weight_max={sample_weights.max():.3g}"
+        )
+
     loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         drop_last=False,
         num_workers=0,
         pin_memory=(device.type == "cuda"),
-        generator=g,
+        generator=None if sampler is not None else g,
     )
 
     best_val_rmse = float("inf")
@@ -677,10 +727,18 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--plots-dir", type=str, default="./plots")
     parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log", "mixed", "sqrt"])
+    parser.add_argument("--sampling", type=str, default="random", choices=["random", "target-balanced"])
+    parser.add_argument("--balanced-target-bins", type=int, default=20)
+    parser.add_argument("--balanced-power", type=float, default=0.5)
+    parser.add_argument("--balanced-max-weight", type=float, default=20.0)
+    parser.add_argument("--sampling-target-transform", type=str, default="sqrt", choices=["raw", "log", "sqrt"])
     parser.add_argument("--log-c2-floor", type=float, default=1e-30)
     parser.add_argument("--log-v-floor", type=float, default=1e-12)
     parser.add_argument("--log-alpha2-floor", type=float, default=1e-30)
     args = parser.parse_args()
+
+    if args.model_type != "mlp" and args.sampling != "random":
+        raise RuntimeError("--sampling target-balanced is currently implemented for --model-type mlp only")
 
     if args.device == "auto":
         if torch.cuda.is_available():
@@ -711,6 +769,15 @@ def main() -> None:
     print(f"Checkpoint:   {args.checkpoint}")
     print(f"Plots dir:    {args.plots_dir}")
     print(f"Normalization:{args.normalization}")
+    print(f"Sampling:     {args.sampling}")
+    if args.sampling == "target-balanced":
+        print(
+            "Sampling cfg: "
+            f"target={args.sampling_target_transform}(alpha2), "
+            f"bins={args.balanced_target_bins}, "
+            f"power={args.balanced_power:g}, "
+            f"max_weight={args.balanced_max_weight:g}"
+        )
     print(
         f"Architecture: {args.in_dim} -> {args.h1} ->"
         f" {args.h2} -> {args.out_dim}"
@@ -770,6 +837,11 @@ def main() -> None:
                 lr=args.lr,
                 batch_size=args.batch_size,
                 print_every=args.print_every,
+                sampling=args.sampling,
+                balanced_target_bins=args.balanced_target_bins,
+                balanced_power=args.balanced_power,
+                balanced_max_weight=args.balanced_max_weight,
+                sampling_target_transform=args.sampling_target_transform,
                 device=device,
             )
             history_by_seed[seed] = history
@@ -856,6 +928,11 @@ def main() -> None:
         "y_std": norm.y_std.astype(np.float64),
         "x_floor": norm.x_floor.astype(np.float64),
         "y_floor": norm.y_floor.astype(np.float64),
+        "sampling": args.sampling,
+        "sampling_target_transform": args.sampling_target_transform,
+        "balanced_target_bins": args.balanced_target_bins,
+        "balanced_power": args.balanced_power,
+        "balanced_max_weight": args.balanced_max_weight,
     }
     if args.model_type == "mlp":
         checkpoint = {
