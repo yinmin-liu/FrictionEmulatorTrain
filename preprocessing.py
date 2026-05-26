@@ -11,6 +11,8 @@ RAW_X_SCALE = np.array([9.05e6, 2.08e-5], dtype=np.float64)
 RAW_Y_OFFSET = np.array([0.0], dtype=np.float64)
 RAW_Y_SCALE = np.array([2.09e11], dtype=np.float64)
 
+RAW_VARIABLE_NAMES = ("C2", "vmag", "alpha2")
+
 
 @dataclass
 class NormalizationConfig:
@@ -23,6 +25,12 @@ class NormalizationConfig:
     y_floor: np.ndarray
 
 
+@dataclass
+class OutlierFilterResult:
+    mask: np.ndarray
+    bounds: dict[str, tuple[float, float]]
+
+
 def normalize(values: np.ndarray, offset: np.ndarray, scale: np.ndarray) -> np.ndarray:
     return (values - offset) / scale
 
@@ -33,6 +41,56 @@ def log_transform(values: np.ndarray, floors: np.ndarray) -> np.ndarray:
 
 def sqrt_transform(values: np.ndarray) -> np.ndarray:
     return np.sqrt(np.maximum(values, 0.0))
+
+
+def raw_variable_matrix(x_raw: np.ndarray, y_raw: np.ndarray) -> np.ndarray:
+    return np.concatenate(
+        [
+            np.asarray(x_raw, dtype=np.float64),
+            np.asarray(y_raw, dtype=np.float64),
+        ],
+        axis=1,
+    )
+
+
+def raw_outlier_filter_mask(
+    x_raw: np.ndarray,
+    y_raw: np.ndarray,
+    columns: tuple[str, ...],
+    mode: str,
+    lower_percentile: float,
+    upper_percentile: float,
+    absolute_bounds: dict[str, tuple[float | None, float | None]] | None = None,
+) -> OutlierFilterResult:
+    data = raw_variable_matrix(x_raw, y_raw)
+    column_to_index = {name: i for i, name in enumerate(RAW_VARIABLE_NAMES)}
+    mask = np.ones(data.shape[0], dtype=bool)
+    bounds: dict[str, tuple[float, float]] = {}
+
+    for column in columns:
+        if column not in column_to_index:
+            raise RuntimeError(f"Unsupported outlier-filter column: {column}")
+        values = data[:, column_to_index[column]]
+        finite = values[np.isfinite(values)]
+        if len(finite) == 0:
+            raise RuntimeError(f"Column {column} has no finite values for outlier filtering.")
+
+        if mode == "percentile":
+            lower = float(np.percentile(finite, lower_percentile))
+            upper = float(np.percentile(finite, upper_percentile))
+        elif mode == "absolute":
+            if absolute_bounds is None or column not in absolute_bounds:
+                raise RuntimeError(f"Missing absolute outlier bounds for {column}.")
+            lower_raw, upper_raw = absolute_bounds[column]
+            lower = float(np.min(finite)) if lower_raw is None else float(lower_raw)
+            upper = float(np.max(finite)) if upper_raw is None else float(upper_raw)
+        else:
+            raise RuntimeError(f"Unsupported outlier-filter mode: {mode}")
+
+        bounds[column] = (lower, upper)
+        mask &= np.isfinite(values) & (values >= lower) & (values <= upper)
+
+    return OutlierFilterResult(mask=mask, bounds=bounds)
 
 
 def build_normalization_config(

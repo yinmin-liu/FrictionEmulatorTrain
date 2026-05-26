@@ -56,6 +56,7 @@ from preprocessing import (
     inverse_transform_y_torch,
     normalize_x_np,
     normalize_y_np,
+    raw_outlier_filter_mask,
     target_balanced_sample_weights,
     transform_x_np,
     transform_x_torch,
@@ -238,6 +239,50 @@ def to_numpy(data: List[FrictionSample]) -> Tuple[np.ndarray, np.ndarray]:
     x = np.array([s.x for s in data], dtype=np.float32)
     y = np.array([s.y for s in data], dtype=np.float32)
     return x, y
+
+
+def parse_outlier_columns(columns: str) -> Tuple[str, ...]:
+    parsed = tuple(item.strip() for item in columns.split(",") if item.strip())
+    if not parsed:
+        raise RuntimeError("--outlier-columns must include at least one column")
+    return parsed
+
+
+def filter_outlier_samples(
+    data: List[FrictionSample],
+    mode: str,
+    columns: Tuple[str, ...],
+    lower_percentile: float,
+    upper_percentile: float,
+    min_c2: float | None,
+    max_c2: float | None,
+    min_vmag: float | None,
+    max_vmag: float | None,
+    min_alpha2: float | None,
+    max_alpha2: float | None,
+) -> Tuple[List[FrictionSample], Dict[str, Tuple[float, float]], int]:
+    if mode == "none":
+        return data, {}, 0
+
+    x_raw, y_raw = to_numpy(data)
+    result = raw_outlier_filter_mask(
+        x_raw,
+        y_raw,
+        columns=columns,
+        mode=mode,
+        lower_percentile=lower_percentile,
+        upper_percentile=upper_percentile,
+        absolute_bounds={
+            "C2": (min_c2, max_c2),
+            "vmag": (min_vmag, max_vmag),
+            "alpha2": (min_alpha2, max_alpha2),
+        },
+    )
+    filtered = [sample for sample, keep in zip(data, result.mask) if bool(keep)]
+    removed = len(data) - len(filtered)
+    if not filtered:
+        raise RuntimeError("Outlier filtering removed all samples.")
+    return filtered, result.bounds, removed
 
 
 # -----------------------------------------------------------------------------
@@ -732,6 +777,16 @@ def main() -> None:
     parser.add_argument("--balanced-power", type=float, default=0.5)
     parser.add_argument("--balanced-max-weight", type=float, default=20.0)
     parser.add_argument("--sampling-target-transform", type=str, default="sqrt", choices=["raw", "log", "sqrt"])
+    parser.add_argument("--outlier-filter", type=str, default="none", choices=["none", "percentile", "absolute"])
+    parser.add_argument("--outlier-columns", type=str, default="C2,alpha2")
+    parser.add_argument("--outlier-lower-percentile", type=float, default=1.0)
+    parser.add_argument("--outlier-upper-percentile", type=float, default=100.0)
+    parser.add_argument("--min-c2", type=float, default=None)
+    parser.add_argument("--max-c2", type=float, default=None)
+    parser.add_argument("--min-vmag", type=float, default=None)
+    parser.add_argument("--max-vmag", type=float, default=None)
+    parser.add_argument("--min-alpha2", type=float, default=None)
+    parser.add_argument("--max-alpha2", type=float, default=None)
     parser.add_argument("--log-c2-floor", type=float, default=1e-30)
     parser.add_argument("--log-v-floor", type=float, default=1e-12)
     parser.add_argument("--log-alpha2-floor", type=float, default=1e-30)
@@ -739,6 +794,8 @@ def main() -> None:
 
     if args.model_type != "mlp" and args.sampling != "random":
         raise RuntimeError("--sampling target-balanced is currently implemented for --model-type mlp only")
+    if args.outlier_filter == "percentile" and args.outlier_lower_percentile > args.outlier_upper_percentile:
+        raise RuntimeError("--outlier-lower-percentile must be <= --outlier-upper-percentile")
 
     if args.device == "auto":
         if torch.cuda.is_available():
@@ -770,6 +827,7 @@ def main() -> None:
     print(f"Plots dir:    {args.plots_dir}")
     print(f"Normalization:{args.normalization}")
     print(f"Sampling:     {args.sampling}")
+    print(f"Outliers:     {args.outlier_filter}")
     if args.sampling == "target-balanced":
         print(
             "Sampling cfg: "
@@ -788,6 +846,28 @@ def main() -> None:
     all_data = load_data(args.folder, args.n_ranks, args.in_dim, args.out_dim)
     if not all_data:
         raise RuntimeError("No data loaded. Exiting.")
+
+    outlier_columns = parse_outlier_columns(args.outlier_columns)
+    all_data, outlier_bounds, removed_outliers = filter_outlier_samples(
+        all_data,
+        mode=args.outlier_filter,
+        columns=outlier_columns,
+        lower_percentile=args.outlier_lower_percentile,
+        upper_percentile=args.outlier_upper_percentile,
+        min_c2=args.min_c2,
+        max_c2=args.max_c2,
+        min_vmag=args.min_vmag,
+        max_vmag=args.max_vmag,
+        min_alpha2=args.min_alpha2,
+        max_alpha2=args.max_alpha2,
+    )
+    if args.outlier_filter != "none":
+        print(
+            f"Outlier filter kept {len(all_data)} samples and removed {removed_outliers} "
+            f"using columns={','.join(outlier_columns)}"
+        )
+        for column, (lower, upper) in outlier_bounds.items():
+            print(f"  {column}: [{lower:.6e}, {upper:.6e}]")
 
     train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
     if args.in_dim != len(RAW_X_SCALE):
@@ -933,6 +1013,10 @@ def main() -> None:
         "balanced_target_bins": args.balanced_target_bins,
         "balanced_power": args.balanced_power,
         "balanced_max_weight": args.balanced_max_weight,
+        "outlier_filter": args.outlier_filter,
+        "outlier_columns": outlier_columns,
+        "outlier_bounds": outlier_bounds,
+        "removed_outliers": removed_outliers,
     }
     if args.model_type == "mlp":
         checkpoint = {

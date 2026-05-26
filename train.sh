@@ -15,4 +15,8 @@ torchrun --nproc_per_node=1 train.py \
 	 --balanced-target-bins 20 \
 	 --balanced-power 0.5 \
 	 --balanced-max-weight 20 \
-	 --sampling-target-transform sqrt
+	 --sampling-target-transform sqrt \
+	 --outlier-filter percentile \
+	 --outlier-columns C2,alpha2 \
+	 --outlier-lower-percentile 1.0 \
+	 --outlier-upper-percentile 100.0
