@@ -85,6 +85,15 @@ def infer_m_values(
     alpha2_pred: np.ndarray,
     denominator_tol: float = 1e-12,
 ) -> np.ndarray:
+    m_values = infer_m_values_full(x_raw, alpha2_pred, denominator_tol)
+    return m_values[np.isfinite(m_values)]
+
+
+def infer_m_values_full(
+    x_raw: np.ndarray,
+    alpha2_pred: np.ndarray,
+    denominator_tol: float = 1e-12,
+) -> np.ndarray:
     c2 = x_raw[:, 0].reshape(-1)
     vmag = x_raw[:, 1].reshape(-1)
     alpha2 = alpha2_pred.reshape(-1)
@@ -100,7 +109,7 @@ def infer_m_values(
         inferred[valid_denominator] = log_vmag[valid_denominator] / denominator[valid_denominator]
         m_values[positive] = inferred
 
-    return m_values[np.isfinite(m_values)]
+    return m_values
 
 
 def print_m_summary(m_values: np.ndarray, total_count: int) -> None:
@@ -121,6 +130,50 @@ def print_m_summary(m_values: np.ndarray, total_count: int) -> None:
     )
 
 
+def print_m_outlier_details(
+    x_raw: np.ndarray,
+    alpha2_true: np.ndarray,
+    alpha2_pred: np.ndarray,
+    m_values_full: np.ndarray,
+    low: float = 2.0,
+    high: float = 4.0,
+) -> None:
+    true_flat = alpha2_true.reshape(-1)
+    pred_flat = alpha2_pred.reshape(-1)
+    outlier_mask = np.isfinite(m_values_full) & ((m_values_full < low) | (m_values_full > high))
+    outlier_indices = np.flatnonzero(outlier_mask)
+
+    print(
+        f"Inferred m outliers outside [{low:g}, {high:g}]: "
+        f"{len(outlier_indices)}/{len(m_values_full)}"
+    )
+    if len(outlier_indices) == 0:
+        return
+
+    print(
+        "  index"
+        "  C2"
+        "  |ub|"
+        "  true_alpha2"
+        "  pred_alpha2"
+        "  rel_err_percent"
+        "  inferred_m"
+    )
+    for idx in outlier_indices:
+        true_val = float(true_flat[idx])
+        pred_val = float(pred_flat[idx])
+        rel_err = abs(pred_val - true_val) / (abs(true_val) + 1e-10) * 100.0
+        print(
+            f"  {idx:d}"
+            f"  {float(x_raw[idx, 0]):.6e}"
+            f"  {float(x_raw[idx, 1]):.6e}"
+            f"  {true_val:.6e}"
+            f"  {pred_val:.6e}"
+            f"  {rel_err:.6f}"
+            f"  {float(m_values_full[idx]):.6e}"
+        )
+
+
 def configure_matplotlib_for_latex(plt) -> None:
     plt.rcParams.update(
         {
@@ -135,10 +188,9 @@ def configure_matplotlib_for_latex(plt) -> None:
 
 
 def save_matplotlib_figure(fig, path: Path) -> None:
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
-    print(f"Saved {path}")
-    print(f"Saved {path.with_suffix('.pdf')}")
+    pdf_path = path.with_suffix(".pdf")
+    fig.savefig(pdf_path, bbox_inches="tight")
+    print(f"Saved {pdf_path}")
 
 
 def _svg_scale(value: float, src_min: float, src_max: float, dst_min: float, dst_max: float) -> float:
@@ -301,6 +353,12 @@ def save_accuracy_outputs(
     out_dir = Path(plots_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    test_true, test_pred = split_predictions["test"]
+    m_values_full = infer_m_values_full(test_x_raw, test_pred)
+    m_values = m_values_full[np.isfinite(m_values_full)]
+    print_m_summary(m_values, len(test_pred))
+    print_m_outlier_details(test_x_raw, test_true, test_pred, m_values_full)
+
     try:
         import matplotlib
 
@@ -309,10 +367,9 @@ def save_accuracy_outputs(
         configure_matplotlib_for_latex(plt)
     except ModuleNotFoundError:
         print(
-            "matplotlib is not installed; saving lightweight SVG plots instead. "
-            "Install it with `python3 -m pip install matplotlib` for PNG output."
+            "matplotlib is not installed; skipping PDF plot generation. "
+            "Install it with `python3 -m pip install matplotlib` for PDF output."
         )
-        save_accuracy_svgs(out_dir, split_predictions, history_by_seed, best_seed, test_x_raw)
         return
 
     fig, ax = plt.subplots(figsize=LATEX_SQUARE_FIGSIZE)
@@ -334,11 +391,10 @@ def save_accuracy_outputs(
     ax.set_title("Prediction Scatter")
     ax.legend(frameon=False)
     fig.tight_layout()
-    scatter_path = out_dir / "prediction_scatter.png"
+    scatter_path = out_dir / "prediction_scatter.pdf"
     save_matplotlib_figure(fig, scatter_path)
     plt.close(fig)
 
-    test_true, test_pred = split_predictions["test"]
     test_error = (test_pred - test_true).reshape(-1)
     fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
     ax.hist(test_error, bins=60, alpha=0.85)
@@ -347,7 +403,7 @@ def save_accuracy_outputs(
     ax.set_ylabel("Count")
     ax.set_title("Test Error Histogram")
     fig.tight_layout()
-    hist_path = out_dir / "test_error_histogram.png"
+    hist_path = out_dir / "test_error_histogram.pdf"
     save_matplotlib_figure(fig, hist_path)
     plt.close(fig)
 
@@ -364,13 +420,10 @@ def save_accuracy_outputs(
     ax.set_title(f"Loss Curves (seed {best_seed})")
     ax.legend(frameon=False)
     fig.tight_layout()
-    loss_path = out_dir / "loss_curves.png"
+    loss_path = out_dir / "loss_curves.pdf"
     save_matplotlib_figure(fig, loss_path)
     plt.close(fig)
 
-    _, test_pred = split_predictions["test"]
-    m_values = infer_m_values(test_x_raw, test_pred)
-    print_m_summary(m_values, len(test_pred))
     if len(m_values) > 0:
         fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
         ax.hist(m_values, bins=60, alpha=0.85)
@@ -378,6 +431,6 @@ def save_accuracy_outputs(
         ax.set_ylabel("Count")
         ax.set_title(r"Inferred $m$ Histogram (test)")
         fig.tight_layout()
-        m_path = out_dir / "inferred_m_histogram.png"
+        m_path = out_dir / "inferred_m_histogram.pdf"
         save_matplotlib_figure(fig, m_path)
         plt.close(fig)
