@@ -81,12 +81,24 @@ def log_transform(values: np.ndarray, floors: np.ndarray) -> np.ndarray:
     return np.log(np.maximum(values, floors))
 
 
+def sqrt_transform(values: np.ndarray) -> np.ndarray:
+    return np.sqrt(np.maximum(values, 0.0))
+
+
 def compute_log_normalized(data: np.ndarray, floors: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     logged = log_transform(data, floors)
     mean = logged.mean(axis=0)
     std = logged.std(axis=0)
     std[std < 1e-12] = 1.0
     return normalize(logged, mean, std), mean, std
+
+
+def compute_sqrt_normalized(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rooted = sqrt_transform(data)
+    mean = rooted.mean(axis=0)
+    std = rooted.std(axis=0)
+    std[std < 1e-12] = 1.0
+    return normalize(rooted, mean, std), mean, std
 
 
 def compute_mixed_normalized(data: np.ndarray, floors: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -187,7 +199,7 @@ def plot_rank_counts(data: np.ndarray, path: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Plot raw, raw-normalized, and log-normalized data distributions.")
+    parser = argparse.ArgumentParser(description="Plot raw and transformed data distributions.")
     parser.add_argument("--folder", type=str, default="./data")
     parser.add_argument("--n-ranks", type=int, default=1)
     parser.add_argument("--out-dir", type=str, default="./data_distribution_plots")
@@ -207,17 +219,25 @@ def main() -> None:
     raw_normalized = normalize(data, raw_offset, raw_scale)
     log_data = log_transform(data, floors)
     log_normalized, log_mean, log_std = compute_log_normalized(data, floors)
+    sqrt_data = sqrt_transform(data)
+    sqrt_normalized, sqrt_mean, sqrt_std = compute_sqrt_normalized(data)
     mixed_normalized, mixed_mean, mixed_std = compute_mixed_normalized(data, floors)
 
     print_summary("Raw variables", data)
     print_summary("Positive raw-scaled variables", raw_normalized)
     print_summary("Log variables", log_data)
     print_summary("Log-normalized variables", log_normalized)
+    print_summary("Square-root variables", sqrt_data)
+    print_summary("Square-root-normalized variables", sqrt_normalized)
     print_summary("Mixed-normalized variables", mixed_normalized)
     print("\nLog normalization constants from loaded data")
     print("--------------------------------------------")
     for variable, mean, std, floor in zip(VARIABLES, log_mean, log_std, floors):
         print(f"{variable:<7} mean={mean:.17g} std={std:.17g} floor={floor:.17g}")
+    print("\nSquare-root normalization constants from loaded data")
+    print("----------------------------------------------------")
+    for variable, mean, std in zip(VARIABLES, sqrt_mean, sqrt_std):
+        print(f"{variable:<7} mean={mean:.17g} std={std:.17g}")
     print("\nMixed normalization constants from loaded data")
     print("----------------------------------------------")
     for variable, mean, std in zip(VARIABLES, mixed_mean, mixed_std):
@@ -252,6 +272,17 @@ def main() -> None:
             r"$(\ln C^2-\mu_{\ln C^2})/\sigma_{\ln C^2}$",
             r"$(\ln |u_b|-\mu_{\ln |u_b|})/\sigma_{\ln |u_b|}$",
             r"$(\ln \alpha^2-\mu_{\ln \alpha^2})/\sigma_{\ln \alpha^2}$",
+        ),
+        bins=args.bins,
+    )
+    plot_hist_grid(
+        sqrt_normalized,
+        "Distributions After Square-Root Normalization",
+        out_dir / "sqrt_normalized_distributions.png",
+        xlabels=(
+            r"$(\sqrt{C^2}-\mu_{\sqrt{C^2}})/\sigma_{\sqrt{C^2}}$",
+            r"$(\sqrt{|u_b|}-\mu_{\sqrt{|u_b|}})/\sigma_{\sqrt{|u_b|}}$",
+            r"$(\sqrt{\alpha^2}-\mu_{\sqrt{\alpha^2}})/\sigma_{\sqrt{\alpha^2}}$",
         ),
         bins=args.bins,
     )

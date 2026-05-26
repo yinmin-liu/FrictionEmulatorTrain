@@ -265,7 +265,7 @@ def build_normalization_config(
             y_floor=y_floor.astype(np.float64),
         )
 
-    if mode != "log":
+    if mode not in ("log", "sqrt"):
         raise RuntimeError(f"Unsupported normalization mode: {mode}")
 
     x_trans = transform_x_np(train_x_raw, mode, x_floor)
@@ -295,6 +295,8 @@ def transform_x_np(x_raw: np.ndarray, mode: str, x_floor: np.ndarray) -> np.ndar
         x_trans = x.copy()
         x_trans[:, 1] = np.log(np.maximum(x[:, 1], x_floor[1]))
         return x_trans
+    if mode == "sqrt":
+        return np.sqrt(np.maximum(x, 0.0))
     return np.log(np.maximum(x, x_floor))
 
 
@@ -302,6 +304,8 @@ def transform_y_np(y_raw: np.ndarray, mode: str, y_floor: np.ndarray) -> np.ndar
     y = np.asarray(y_raw, dtype=np.float64)
     if mode == "raw":
         return y
+    if mode == "sqrt":
+        return np.sqrt(np.maximum(y, 0.0))
     return np.log(np.maximum(y, y_floor))
 
 
@@ -316,6 +320,8 @@ def normalize_y_np(y_raw: np.ndarray, norm: NormalizationConfig) -> np.ndarray:
 def inverse_transform_y_np(y_trans: np.ndarray, norm: NormalizationConfig) -> np.ndarray:
     if norm.mode == "raw":
         return y_trans
+    if norm.mode == "sqrt":
+        return np.maximum(y_trans, 0.0) ** 2
     return np.exp(y_trans)
 
 
@@ -331,12 +337,16 @@ def transform_x_torch(x_raw: torch.Tensor, norm: NormalizationConfig, device: to
         c2 = x_raw[:, 0:1]
         vmag = torch.log(torch.maximum(x_raw[:, 1:2], x_floor[1]))
         return torch.cat((c2, vmag), dim=1)
+    if norm.mode == "sqrt":
+        return torch.sqrt(torch.clamp_min(x_raw, 0.0))
     return torch.log(torch.maximum(x_raw, x_floor))
 
 
 def inverse_transform_y_torch(y_trans: torch.Tensor, norm: NormalizationConfig) -> torch.Tensor:
     if norm.mode == "raw":
         return y_trans
+    if norm.mode == "sqrt":
+        return torch.square(torch.clamp_min(y_trans, 0.0))
     return torch.exp(y_trans)
 
 
@@ -523,11 +533,17 @@ def export_to_cpp_text(
         f.write(f"OUT {out_dim}\n")
         if norm.mode != "raw":
             f.write(f"NORMALIZATION {norm.mode}\n")
-            f.write("LOG_BASE e\n")
+            if norm.mode in ("log", "mixed"):
+                f.write("LOG_BASE e\n")
             if norm.mode == "mixed":
                 f.write("x_transform raw\n")
                 f.write("x_transform log\n")
                 f.write("y_transform log\n")
+            elif norm.mode == "sqrt":
+                for _ in range(in_dim):
+                    f.write("x_transform sqrt\n")
+                for _ in range(out_dim):
+                    f.write("y_transform sqrt\n")
             for j in range(in_dim):
                 f.write(f"x_floor {float(norm.x_floor[j]):.17g}\n")
             for j in range(out_dim):
@@ -786,7 +802,7 @@ def main() -> None:
     parser.add_argument("--xgb-max-depth", type=int, default=6)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--plots-dir", type=str, default="./plots")
-    parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log", "mixed"])
+    parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log", "mixed", "sqrt"])
     parser.add_argument("--log-c2-floor", type=float, default=1e-30)
     parser.add_argument("--log-v-floor", type=float, default=1e-12)
     parser.add_argument("--log-alpha2-floor", type=float, default=1e-30)
@@ -853,7 +869,7 @@ def main() -> None:
     print(f"x_std:        {fmt_seq(norm.x_std.tolist())}")
     print(f"y_mean:       {fmt_seq(norm.y_mean.tolist())}")
     print(f"y_std:        {fmt_seq(norm.y_std.tolist())}")
-    if norm.mode == "log":
+    if norm.mode in ("log", "mixed"):
         print(f"x_floor:      {fmt_seq(norm.x_floor.tolist())}")
         print(f"y_floor:      {fmt_seq(norm.y_floor.tolist())}")
 

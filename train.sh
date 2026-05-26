@@ -10,4 +10,4 @@ torchrun --nproc_per_node=1 train.py \
     --model-file ./friction_emulator.txt \
     --checkpoint ./friction_emulator.pt \
 	 --device auto \
-	 --normalization log
+	 --normalization sqrt
