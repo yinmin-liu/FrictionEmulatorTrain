@@ -1,26 +1,51 @@
-Fixed normalization constants for FrictionEmulator
+Log normalization constants for FrictionEmulator
 
-These values are hard-coded in:
-/Users/yinmin/Downloads/FrictionEmulator/train_pytorch_friction.py
+These values match the current train.py log-normalization path and the current
+train.sh setup:
 
-Rounded values used by training and inference:
+folder        = ./data
+n_ranks       = 10
+split_seed    = 42
+train_ratio   = 0.70
+val_ratio     = 0.15
+normalization = log
+log_base      = e (natural logarithm)
 
-x_mean = [9.05e6, 2.08e-5]
-x_std  = [6.61e6, 4.67e-5]
-y_mean = [2.09e11]
-y_std  = [1.18e12]
+The constants are computed from the training split only, after applying the
+natural-log transform.
 
 Variable order:
 1. C2
 2. vmag
 3. alpha2
 
-Normalization formulas:
+Floors applied before log:
 
-C2_norm    = (C2 - 9.05e6) / 6.61e6
-vmag_norm  = (vmag - 2.08e-5) / 4.67e-5
-alpha2_norm = (alpha2 - 2.09e11) / 1.18e12
+x_floor = [1.0000000000000001e-30, 9.9999999999999998e-13]
+y_floor = [1.0000000000000001e-30]
+
+Log-space mean/std:
+
+x_mean = [15.853013060672888, -14.369379188536289]
+x_std  = [1.2777508831457713, 1.0928669173617296]
+y_mean = [25.432599186435276]
+y_std  = [1.4568046734404581]
+
+Training-time normalization formulas:
+
+C2_log       = ln(max(C2, 1.0e-30))
+vmag_log     = ln(max(vmag, 1.0e-12))
+alpha2_log   = ln(max(alpha2, 1.0e-30))
+
+C2_norm      = (C2_log - 15.853013060672888) / 1.2777508831457713
+vmag_norm    = (vmag_log - -14.369379188536289) / 1.0928669173617296
+alpha2_norm  = (alpha2_log - 25.432599186435276) / 1.4568046734404581
+
+Equivalent vmag formula:
+
+vmag_norm    = (vmag_log + 14.369379188536289) / 1.0928669173617296
 
 Inference-time de-normalization:
 
-alpha2 = alpha2_norm * 1.18e12 + 2.09e11
+alpha2_log = alpha2_norm * 1.4568046734404581 + 25.432599186435276
+alpha2     = exp(alpha2_log)

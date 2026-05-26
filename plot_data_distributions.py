@@ -9,11 +9,16 @@ from typing import List, Tuple
 
 import numpy as np
 
-
-RAW_X_OFFSET = np.array([0.0, 0.0], dtype=np.float64)
-RAW_X_SCALE = np.array([9.05e6, 2.08e-5], dtype=np.float64)
-RAW_Y_OFFSET = np.array([0.0], dtype=np.float64)
-RAW_Y_SCALE = np.array([2.09e11], dtype=np.float64)
+from preprocessing import (
+    RAW_X_OFFSET,
+    RAW_X_SCALE,
+    RAW_Y_OFFSET,
+    RAW_Y_SCALE,
+    log_transform,
+    normalize,
+    sqrt_transform,
+    target_balanced_sample_indices,
+)
 
 VARIABLES = ("C2", "vmag", "alpha2")
 RAW_LABELS = (r"$C^2$", r"$|u_b|$", r"$\alpha^2$")
@@ -73,18 +78,6 @@ def load_rank_data(folder: str, n_ranks: int) -> np.ndarray:
     return data
 
 
-def normalize(values: np.ndarray, offset: np.ndarray, scale: np.ndarray) -> np.ndarray:
-    return (values - offset) / scale
-
-
-def log_transform(values: np.ndarray, floors: np.ndarray) -> np.ndarray:
-    return np.log(np.maximum(values, floors))
-
-
-def sqrt_transform(values: np.ndarray) -> np.ndarray:
-    return np.sqrt(np.maximum(values, 0.0))
-
-
 def compute_log_normalized(data: np.ndarray, floors: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     logged = log_transform(data, floors)
     mean = logged.mean(axis=0)
@@ -99,16 +92,6 @@ def compute_sqrt_normalized(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray, n
     std = rooted.std(axis=0)
     std[std < 1e-12] = 1.0
     return normalize(rooted, mean, std), mean, std
-
-
-def compute_mixed_normalized(data: np.ndarray, floors: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    mixed = data.copy()
-    mixed[:, 1] = np.log(np.maximum(data[:, 1], floors[1]))
-    mixed[:, 2] = np.log(np.maximum(data[:, 2], floors[2]))
-    mean = np.array([RAW_X_OFFSET[0], mixed[:, 1].mean(), mixed[:, 2].mean()], dtype=np.float64)
-    scale = np.array([RAW_X_SCALE[0], mixed[:, 1].std(), mixed[:, 2].std()], dtype=np.float64)
-    scale[scale < 1e-12] = 1.0
-    return normalize(mixed, mean, scale), mean, scale
 
 
 def print_summary(name: str, data: np.ndarray) -> None:
@@ -140,61 +123,72 @@ def plot_hist_grid(
     xlabels: Tuple[str, str, str] = VARIABLES,
     bins: int = 80,
 ) -> None:
-    import matplotlib
+    from PIL import Image, ImageDraw, ImageFont
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    width, height = 1800, 640
+    margin_x = 80
+    top = 110
+    bottom = 125
+    gap = 70
+    plot_w = (width - 2 * margin_x - 2 * gap) // 3
+    plot_h = height - top - bottom
 
-    plt.rcParams.update(
-        {
-            "font.size": 8,
-            "axes.labelsize": 8,
-            "axes.titlesize": 9,
-            "xtick.labelsize": 7,
-            "ytick.labelsize": 7,
-            "legend.fontsize": 7,
-        }
-    )
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    font_path = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
+    title_font = ImageFont.truetype(str(font_path), 32) if font_path.exists() else ImageFont.load_default()
+    label_font = ImageFont.truetype(str(font_path), 24) if font_path.exists() else ImageFont.load_default()
+    tick_font = ImageFont.truetype(str(font_path), 18) if font_path.exists() else ImageFont.load_default()
+    bar_color = (66, 145, 194)
+    grid_color = (220, 220, 220)
+    axis_color = (20, 20, 20)
 
-    fig, axes = plt.subplots(1, 3, figsize=(6.3, 2.2))
-    fig.suptitle(title, fontsize=9)
-    for i, ax in enumerate(axes):
+    def text_center(x: float, y: float, text: str, font) -> None:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        draw.text((x - (bbox[2] - bbox[0]) / 2, y), text, fill=axis_color, font=font)
+
+    text_center(width / 2, 24, title, title_font)
+
+    for i in range(3):
         values = data[:, i]
         values = values[np.isfinite(values)]
-        ax.hist(values, bins=bins, alpha=0.85)
-        ax.set_xlabel(xlabels[i])
-        ax.set_ylabel("count")
-        ax.set_yscale("log")
-        ax.grid(alpha=0.2)
-    fig.tight_layout()
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved {path}")
-    print(f"Saved {path.with_suffix('.pdf')}")
+        counts, edges = np.histogram(values, bins=bins)
+        log_counts = np.log10(np.maximum(counts, 1))
+        y_max = max(float(log_counts.max()), 1.0)
 
+        left = margin_x + i * (plot_w + gap)
+        right = left + plot_w
+        bottom_y = top + plot_h
 
-def plot_rank_counts(data: np.ndarray, path: Path) -> None:
-    import matplotlib
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = bottom_y - frac * plot_h
+            draw.line((left, y, right, y), fill=grid_color, width=1)
+        for frac in (0.0, 0.5, 1.0):
+            x = left + frac * plot_w
+            draw.line((x, top, x, bottom_y), fill=grid_color, width=1)
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+        draw.rectangle((left, top, right, bottom_y), outline=axis_color, width=3)
 
-    fig, ax = plt.subplots(figsize=(6.3, 2.2))
-    ax.text(
-        0.5,
-        0.5,
-        f"Loaded {len(data):,} samples",
-        ha="center",
-        va="center",
-        fontsize=10,
-    )
-    ax.axis("off")
-    fig.tight_layout()
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved {path}")
+        for j, count in enumerate(counts):
+            if count <= 0:
+                continue
+            x0 = left + j * plot_w / bins
+            x1 = left + (j + 1) * plot_w / bins
+            y0 = bottom_y - (math.log10(count) / y_max) * plot_h
+            draw.rectangle((x0, y0, max(x0 + 1, x1), bottom_y), fill=bar_color)
+
+        xmin = float(edges[0])
+        xmax = float(edges[-1])
+        text_center(left, bottom_y + 12, f"{xmin:.2g}", tick_font)
+        text_center((left + right) / 2, bottom_y + 12, f"{0.5 * (xmin + xmax):.2g}", tick_font)
+        text_center(right, bottom_y + 12, f"{xmax:.2g}", tick_font)
+        draw.text((left - 55, top - 8), f"1e{int(round(y_max))}", fill=axis_color, font=tick_font)
+        draw.text((left - 55, bottom_y - 18), "1", fill=axis_color, font=tick_font)
+        text_center((left + right) / 2, bottom_y + 48, xlabels[i], label_font)
+
+    draw.text((18, top + plot_h / 2 - 20), "count (log)", fill=axis_color, font=label_font)
+    path = path.with_suffix(".pdf")
+    image.save(path, "PDF", resolution=300.0)
     print(f"Saved {path.with_suffix('.pdf')}")
 
 
@@ -204,6 +198,11 @@ def main() -> None:
     parser.add_argument("--n-ranks", type=int, default=1)
     parser.add_argument("--out-dir", type=str, default="./data_distribution_plots")
     parser.add_argument("--bins", type=int, default=80)
+    parser.add_argument("--balanced-target-bins", type=int, default=20)
+    parser.add_argument("--balanced-samples", type=int, default=None)
+    parser.add_argument("--balanced-power", type=float, default=0.5)
+    parser.add_argument("--balanced-max-weight", type=float, default=20.0)
+    parser.add_argument("--balanced-seed", type=int, default=42)
     parser.add_argument("--log-c2-floor", type=float, default=1e-30)
     parser.add_argument("--log-v-floor", type=float, default=1e-12)
     parser.add_argument("--log-alpha2-floor", type=float, default=1e-30)
@@ -221,7 +220,16 @@ def main() -> None:
     log_normalized, log_mean, log_std = compute_log_normalized(data, floors)
     sqrt_data = sqrt_transform(data)
     sqrt_normalized, sqrt_mean, sqrt_std = compute_sqrt_normalized(data)
-    mixed_normalized, mixed_mean, mixed_std = compute_mixed_normalized(data, floors)
+    balanced_idx = target_balanced_sample_indices(
+        sqrt_data[:, 2],
+        n_bins=args.balanced_target_bins,
+        n_samples=args.balanced_samples or len(data),
+        balance_power=args.balanced_power,
+        max_weight=args.balanced_max_weight,
+        seed=args.balanced_seed,
+    )
+    raw_balanced = raw_normalized[balanced_idx]
+    sqrt_balanced = sqrt_normalized[balanced_idx]
 
     print_summary("Raw variables", data)
     print_summary("Positive raw-scaled variables", raw_normalized)
@@ -229,7 +237,8 @@ def main() -> None:
     print_summary("Log-normalized variables", log_normalized)
     print_summary("Square-root variables", sqrt_data)
     print_summary("Square-root-normalized variables", sqrt_normalized)
-    print_summary("Mixed-normalized variables", mixed_normalized)
+    print_summary("Raw-normalized target-balanced samples", raw_balanced)
+    print_summary("Square-root-normalized target-balanced samples", sqrt_balanced)
     print("\nLog normalization constants from loaded data")
     print("--------------------------------------------")
     for variable, mean, std, floor in zip(VARIABLES, log_mean, log_std, floors):
@@ -238,66 +247,65 @@ def main() -> None:
     print("----------------------------------------------------")
     for variable, mean, std in zip(VARIABLES, sqrt_mean, sqrt_std):
         print(f"{variable:<7} mean={mean:.17g} std={std:.17g}")
-    print("\nMixed normalization constants from loaded data")
-    print("----------------------------------------------")
-    for variable, mean, std in zip(VARIABLES, mixed_mean, mixed_std):
-        print(f"{variable:<7} mean={mean:.17g} std={std:.17g}")
+    print("\nTarget-balanced sampling")
+    print("------------------------")
+    print(f"target variable: sqrt(alpha2)")
+    print(f"target bins: {args.balanced_target_bins}")
+    print(f"balance power: {args.balanced_power}")
+    print(f"max relative sample weight: {args.balanced_max_weight}")
+    print(f"sampled training examples: {len(balanced_idx)}")
 
-    plot_hist_grid(
-        data,
-        "Raw Variable Distributions",
-        out_dir / "raw_distributions.png",
-        xlabels=RAW_LABELS,
-        bins=args.bins,
-    )
-    plot_hist_grid(
-        np.log10(np.maximum(data, floors)),
-        f"Log10 Raw Variable Distributions ({args.n_ranks} ranks)",
-        out_dir / "log10_raw_distributions.png",
-        xlabels=(r"$\log_{10}(C^2)$", r"$\log_{10}(|u_b|)$", r"$\log_{10}(\alpha^2)$"),
-        bins=args.bins,
-    )
     plot_hist_grid(
         raw_normalized,
         "Distributions After Positive Raw Scaling",
-        out_dir / "raw_normalized_distributions.png",
-        xlabels=(r"$C^2 / 9.05e6$", r"$|u_b| / 2.08e-5$", r"$\alpha^2 / 2.09e11$"),
+        out_dir / "raw_normalized_distributions.pdf",
+        xlabels=("C2 / 9.05e6", "|ub| / 2.08e-5", "alpha2 / 2.09e11"),
         bins=args.bins,
     )
     plot_hist_grid(
         log_normalized,
         "Distributions After Log Normalization",
-        out_dir / "log_normalized_distributions.png",
+        out_dir / "log_normalized_distributions.pdf",
         xlabels=(
-            r"$(\ln C^2-\mu_{\ln C^2})/\sigma_{\ln C^2}$",
-            r"$(\ln |u_b|-\mu_{\ln |u_b|})/\sigma_{\ln |u_b|}$",
-            r"$(\ln \alpha^2-\mu_{\ln \alpha^2})/\sigma_{\ln \alpha^2}$",
+            "(ln C2 - mean) / std",
+            "(ln |ub| - mean) / std",
+            "(ln alpha2 - mean) / std",
         ),
         bins=args.bins,
     )
     plot_hist_grid(
         sqrt_normalized,
         "Distributions After Square-Root Normalization",
-        out_dir / "sqrt_normalized_distributions.png",
+        out_dir / "sqrt_normalized_distributions.pdf",
         xlabels=(
-            r"$(\sqrt{C^2}-\mu_{\sqrt{C^2}})/\sigma_{\sqrt{C^2}}$",
-            r"$(\sqrt{|u_b|}-\mu_{\sqrt{|u_b|}})/\sigma_{\sqrt{|u_b|}}$",
-            r"$(\sqrt{\alpha^2}-\mu_{\sqrt{\alpha^2}})/\sigma_{\sqrt{\alpha^2}}$",
+            "(sqrt C2 - mean) / std",
+            "(sqrt |ub| - mean) / std",
+            "(sqrt alpha2 - mean) / std",
         ),
         bins=args.bins,
     )
     plot_hist_grid(
-        mixed_normalized,
-        "Distributions After Mixed Normalization",
-        out_dir / "mixed_normalized_distributions.png",
+        raw_balanced,
+        "Raw-Scaled Distributions After Target-Balanced Sampling",
+        out_dir / "raw_normalized_balanced_sampling_distributions.pdf",
         xlabels=(
-            r"$C^2 / 9.05e6$",
-            r"$(\ln |u_b|-\mu_{\ln |u_b|})/\sigma_{\ln |u_b|}$",
-            r"$(\ln \alpha^2-\mu_{\ln \alpha^2})/\sigma_{\ln \alpha^2}$",
+            "C2 / 9.05e6",
+            "|ub| / 2.08e-5",
+            "alpha2 / 2.09e11",
         ),
         bins=args.bins,
     )
-    plot_rank_counts(data, out_dir / "sample_count.png")
+    plot_hist_grid(
+        sqrt_balanced,
+        "Square-Root Normalized Distributions After Target-Balanced Sampling",
+        out_dir / "sqrt_normalized_balanced_sampling_distributions.pdf",
+        xlabels=(
+            "(sqrt C2 - mean) / std",
+            "(sqrt |ub| - mean) / std",
+            "(sqrt alpha2 - mean) / std",
+        ),
+        bins=args.bins,
+    )
 
 
 if __name__ == "__main__":
