@@ -525,6 +525,11 @@ def train_one_seed(
     lr: float,
     batch_size: int,
     print_every: int,
+    lr_scheduler: str,
+    lr_patience: int,
+    lr_factor: float,
+    lr_min: float,
+    lr_threshold: float,
     sampling: str,
     balanced_target_bins: int,
     balanced_power: float,
@@ -536,6 +541,17 @@ def train_one_seed(
 
     model = FrictionMLP(in_dim=in_dim, h1=h1, h2=h2, out_dim=out_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = None
+    if lr_scheduler == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=lr_factor,
+            patience=lr_patience,
+            threshold=lr_threshold,
+            threshold_mode="rel",
+            min_lr=lr_min,
+        )
     criterion = nn.MSELoss()
 
     train_x = (transform_x_np(train_x_raw, norm.mode, norm.x_floor) - norm.x_mean) / norm.x_std
@@ -632,16 +648,24 @@ def train_one_seed(
                 device,
                 batch_size=batch_size,
             )
+            old_lr = float(optimizer.param_groups[0]["lr"])
+            if scheduler is not None:
+                scheduler.step(val_rmse)
+            current_lr = float(optimizer.param_groups[0]["lr"])
             print(
                 f"Epoch {epoch}  Train RMSE = {fmt_sci(train_rmse)}"
                 f"  Val RMSE = {fmt_sci(val_rmse)}"
+                f"  LR = {fmt_sci(current_lr)}"
             )
+            if current_lr < old_lr:
+                print(f"  LR reduced: {fmt_sci(old_lr)} -> {fmt_sci(current_lr)}")
             history.append(
                 {
                     "epoch": float(epoch),
                     "train_rmse": float(train_rmse),
                     "val_rmse": float(val_rmse),
                     "train_mse_norm": float(total_loss / max(total_count, 1)),
+                    "lr": current_lr,
                 }
             )
 
@@ -764,6 +788,11 @@ def main() -> None:
     parser.add_argument("--h2", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=5000)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr-scheduler", type=str, default="none", choices=["none", "plateau"])
+    parser.add_argument("--lr-patience", type=int, default=4)
+    parser.add_argument("--lr-factor", type=float, default=0.5)
+    parser.add_argument("--lr-min", type=float, default=1e-6)
+    parser.add_argument("--lr-threshold", type=float, default=1e-4)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--n-seeds", type=int, default=5)
     parser.add_argument("--print-every", type=int, default=100)
@@ -796,6 +825,8 @@ def main() -> None:
         raise RuntimeError("--sampling target-balanced is currently implemented for --model-type mlp only")
     if args.outlier_filter == "percentile" and args.outlier_lower_percentile > args.outlier_upper_percentile:
         raise RuntimeError("--outlier-lower-percentile must be <= --outlier-upper-percentile")
+    if not (0.0 < args.lr_factor < 1.0):
+        raise RuntimeError("--lr-factor must be between 0 and 1")
 
     if args.device == "auto":
         if torch.cuda.is_available():
@@ -818,6 +849,15 @@ def main() -> None:
     print(f"N ranks:      {args.n_ranks}")
     print(f"Epochs:       {args.epochs}")
     print(f"LR:           {fmt_sci(args.lr)}")
+    print(f"LR scheduler: {args.lr_scheduler}")
+    if args.lr_scheduler == "plateau":
+        print(
+            "LR cfg:       "
+            f"patience={args.lr_patience}, "
+            f"factor={args.lr_factor:g}, "
+            f"min_lr={fmt_sci(args.lr_min)}, "
+            f"threshold={args.lr_threshold:g}"
+        )
     print(f"Batch size:   {args.batch_size}")
     print(f"N seeds:      {args.n_seeds}")
     print(f"Model type:   {args.model_type}")
@@ -917,6 +957,11 @@ def main() -> None:
                 lr=args.lr,
                 batch_size=args.batch_size,
                 print_every=args.print_every,
+                lr_scheduler=args.lr_scheduler,
+                lr_patience=args.lr_patience,
+                lr_factor=args.lr_factor,
+                lr_min=args.lr_min,
+                lr_threshold=args.lr_threshold,
                 sampling=args.sampling,
                 balanced_target_bins=args.balanced_target_bins,
                 balanced_power=args.balanced_power,
@@ -1017,6 +1062,11 @@ def main() -> None:
         "outlier_columns": outlier_columns,
         "outlier_bounds": outlier_bounds,
         "removed_outliers": removed_outliers,
+        "lr_scheduler": args.lr_scheduler,
+        "lr_patience": args.lr_patience,
+        "lr_factor": args.lr_factor,
+        "lr_min": args.lr_min,
+        "lr_threshold": args.lr_threshold,
     }
     if args.model_type == "mlp":
         checkpoint = {
