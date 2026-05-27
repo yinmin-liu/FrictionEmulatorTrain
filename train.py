@@ -61,6 +61,7 @@ from preprocessing import (
     transform_x_np,
     transform_x_torch,
     transform_y_np,
+    velocity_focused_sample_weights,
 )
 
 
@@ -109,6 +110,22 @@ def transform_sampling_target(
     if mode == "log":
         return np.log(np.maximum(y[:, 0], y_floor[0]))
     raise RuntimeError(f"Unsupported sampling target transform: {mode}")
+
+
+def transform_sampling_velocity(
+    x_raw: np.ndarray,
+    mode: str,
+    x_floor: np.ndarray,
+) -> np.ndarray:
+    x = np.asarray(x_raw, dtype=np.float64).reshape(len(x_raw), -1)
+    velocity = x[:, 1]
+    if mode == "raw":
+        return velocity
+    if mode == "sqrt":
+        return np.sqrt(np.maximum(velocity, 0.0))
+    if mode == "log":
+        return np.log(np.maximum(velocity, x_floor[1]))
+    raise RuntimeError(f"Unsupported sampling velocity transform: {mode}")
 
 
 def describe_device(device: torch.device) -> str:
@@ -532,9 +549,11 @@ def train_one_seed(
     lr_threshold: float,
     sampling: str,
     balanced_target_bins: int,
+    balanced_velocity_bins: int,
     balanced_power: float,
     balanced_max_weight: float,
     sampling_target_transform: str,
+    sampling_velocity_transform: str,
     device: torch.device,
 ) -> Tuple[FrictionMLP, float, List[Dict[str, float]]]:
     set_seed(seed)
@@ -586,6 +605,31 @@ def train_one_seed(
             "Target-balanced sampler:"
             f" target={sampling_target_transform}(alpha2)"
             f" bins={balanced_target_bins}"
+            f" power={balanced_power:g}"
+            f" max_weight={balanced_max_weight:g}"
+            f" weight_min={sample_weights.min():.3g}"
+            f" weight_median={np.median(sample_weights):.3g}"
+            f" weight_max={sample_weights.max():.3g}"
+        )
+    elif sampling == "velocity-focused":
+        velocity = transform_sampling_velocity(train_x_raw, sampling_velocity_transform, norm.x_floor)
+        sample_weights = velocity_focused_sample_weights(
+            velocity,
+            n_bins=balanced_velocity_bins,
+            focus_power=balanced_power,
+            max_weight=balanced_max_weight,
+        )
+        sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(sample_weights, dtype=torch.double),
+            num_samples=len(sample_weights),
+            replacement=True,
+            generator=g,
+        )
+        shuffle = False
+        print(
+            "Velocity-focused sampler:"
+            f" velocity={sampling_velocity_transform}(|ub|)"
+            f" bins={balanced_velocity_bins}"
             f" power={balanced_power:g}"
             f" max_weight={balanced_max_weight:g}"
             f" weight_min={sample_weights.min():.3g}"
@@ -801,11 +845,18 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--plots-dir", type=str, default="./plots")
     parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log", "mixed", "sqrt"])
-    parser.add_argument("--sampling", type=str, default="random", choices=["random", "target-balanced"])
+    parser.add_argument(
+        "--sampling",
+        type=str,
+        default="random",
+        choices=["random", "target-balanced", "velocity-focused"],
+    )
     parser.add_argument("--balanced-target-bins", type=int, default=20)
+    parser.add_argument("--balanced-velocity-bins", type=int, default=20)
     parser.add_argument("--balanced-power", type=float, default=0.5)
     parser.add_argument("--balanced-max-weight", type=float, default=20.0)
     parser.add_argument("--sampling-target-transform", type=str, default="sqrt", choices=["raw", "log", "sqrt"])
+    parser.add_argument("--sampling-velocity-transform", type=str, default="sqrt", choices=["raw", "log", "sqrt"])
     parser.add_argument("--outlier-filter", type=str, default="none", choices=["none", "percentile", "absolute"])
     parser.add_argument("--outlier-columns", type=str, default="C2,alpha2")
     parser.add_argument("--outlier-lower-percentile", type=float, default=1.0)
@@ -822,11 +873,17 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.model_type != "mlp" and args.sampling != "random":
-        raise RuntimeError("--sampling target-balanced is currently implemented for --model-type mlp only")
+        raise RuntimeError("--sampling is currently implemented for --model-type mlp only")
     if args.outlier_filter == "percentile" and args.outlier_lower_percentile > args.outlier_upper_percentile:
         raise RuntimeError("--outlier-lower-percentile must be <= --outlier-upper-percentile")
     if not (0.0 < args.lr_factor < 1.0):
         raise RuntimeError("--lr-factor must be between 0 and 1")
+    if args.balanced_target_bins < 1 or args.balanced_velocity_bins < 1:
+        raise RuntimeError("--balanced-target-bins and --balanced-velocity-bins must be >= 1")
+    if args.balanced_power <= 0.0:
+        raise RuntimeError("--balanced-power must be > 0")
+    if args.balanced_max_weight < 1.0:
+        raise RuntimeError("--balanced-max-weight must be >= 1")
 
     if args.device == "auto":
         if torch.cuda.is_available():
@@ -873,6 +930,14 @@ def main() -> None:
             "Sampling cfg: "
             f"target={args.sampling_target_transform}(alpha2), "
             f"bins={args.balanced_target_bins}, "
+            f"power={args.balanced_power:g}, "
+            f"max_weight={args.balanced_max_weight:g}"
+        )
+    elif args.sampling == "velocity-focused":
+        print(
+            "Sampling cfg: "
+            f"velocity={args.sampling_velocity_transform}(|ub|), "
+            f"bins={args.balanced_velocity_bins}, "
             f"power={args.balanced_power:g}, "
             f"max_weight={args.balanced_max_weight:g}"
         )
@@ -964,9 +1029,11 @@ def main() -> None:
                 lr_threshold=args.lr_threshold,
                 sampling=args.sampling,
                 balanced_target_bins=args.balanced_target_bins,
+                balanced_velocity_bins=args.balanced_velocity_bins,
                 balanced_power=args.balanced_power,
                 balanced_max_weight=args.balanced_max_weight,
                 sampling_target_transform=args.sampling_target_transform,
+                sampling_velocity_transform=args.sampling_velocity_transform,
                 device=device,
             )
             history_by_seed[seed] = history
@@ -1055,7 +1122,9 @@ def main() -> None:
         "y_floor": norm.y_floor.astype(np.float64),
         "sampling": args.sampling,
         "sampling_target_transform": args.sampling_target_transform,
+        "sampling_velocity_transform": args.sampling_velocity_transform,
         "balanced_target_bins": args.balanced_target_bins,
+        "balanced_velocity_bins": args.balanced_velocity_bins,
         "balanced_power": args.balanced_power,
         "balanced_max_weight": args.balanced_max_weight,
         "outlier_filter": args.outlier_filter,

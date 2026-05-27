@@ -280,3 +280,43 @@ def target_balanced_sample_weights(
     if sample_weights.sum() <= 0.0:
         raise RuntimeError("Balanced sampling weights sum to zero.")
     return sample_weights.astype(np.float64)
+
+
+def velocity_focused_sample_weights(
+    velocity: np.ndarray,
+    n_bins: int,
+    focus_power: float,
+    max_weight: float,
+) -> np.ndarray:
+    values = np.asarray(velocity, dtype=np.float64).reshape(-1)
+    finite_values = values[np.isfinite(values)]
+    if len(finite_values) == 0:
+        raise RuntimeError("Velocity has no finite values for velocity-focused sampling.")
+
+    vmin = float(finite_values.min())
+    vmax = float(finite_values.max())
+    if vmax <= vmin:
+        return np.ones_like(values, dtype=np.float64)
+
+    edges = np.linspace(vmin, vmax, n_bins + 1)
+    bin_ids = np.digitize(values, edges[1:-1], right=False)
+    counts = np.bincount(bin_ids, minlength=n_bins).astype(np.float64)
+    occupied = counts > 0
+    if not np.any(occupied):
+        raise RuntimeError("No occupied velocity bins were found for focused sampling.")
+
+    bin_rank = np.linspace(0.0, 1.0, n_bins)
+    desired_bin_mass = 1.0 + (max_weight - 1.0) * np.power(bin_rank, focus_power)
+
+    bin_weights = np.zeros(n_bins, dtype=np.float64)
+    bin_weights[occupied] = desired_bin_mass[occupied] / counts[occupied]
+    median_weight = np.median(bin_weights[occupied])
+    if median_weight > 0.0:
+        bin_weights[occupied] /= median_weight
+    bin_weights[occupied] = np.minimum(bin_weights[occupied], max_weight)
+
+    sample_weights = bin_weights[bin_ids]
+    sample_weights = np.where(np.isfinite(values), sample_weights, 0.0)
+    if sample_weights.sum() <= 0.0:
+        raise RuntimeError("Velocity-focused sampling weights sum to zero.")
+    return sample_weights.astype(np.float64)
