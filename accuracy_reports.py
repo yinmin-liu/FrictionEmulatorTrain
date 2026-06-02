@@ -50,22 +50,38 @@ def predict_raw(
     return np.concatenate(preds, axis=0)
 
 
-def compute_accuracy_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+def compute_accuracy_metrics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    relative_error_floor: float = 1e5,
+) -> Dict[str, float]:
     error = y_pred - y_true
     abs_error = np.abs(error)
     rmse = float(np.sqrt(np.mean(error * error)))
     mae = float(np.mean(abs_error))
-    rel_error = abs_error / (np.abs(y_true) + 1e-10)
-    mape = float(np.mean(rel_error) * 100.0)
-    max_rel_error = float(np.max(rel_error) * 100.0)
+    rel_error = (abs_error / (np.abs(y_true) + 1e-10)).reshape(-1) * 100.0
+    meaningful_mask = np.abs(y_true).reshape(-1) >= relative_error_floor
+    meaningful_rel_error = rel_error[meaningful_mask]
     ss_res = float(np.sum(error * error))
     ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else float("nan")
+
+    def percentile(values: np.ndarray, q: float) -> float:
+        if len(values) == 0:
+            return float("nan")
+        return float(np.percentile(values, q))
+
     return {
         "rmse": rmse,
         "mae": mae,
-        "mape_percent": mape,
-        "max_rel_error_percent": max_rel_error,
+        "rel_p50_percent": percentile(rel_error, 50.0),
+        "rel_p90_percent": percentile(rel_error, 90.0),
+        "rel_p95_percent": percentile(rel_error, 95.0),
+        "rel_p99_percent": percentile(rel_error, 99.0),
+        "relative_error_floor": float(relative_error_floor),
+        "relative_error_count": float(np.count_nonzero(meaningful_mask)),
+        "floor_rel_p50_percent": percentile(meaningful_rel_error, 50.0),
+        "floor_rel_p95_percent": percentile(meaningful_rel_error, 95.0),
         "r2": float(r2),
     }
 
@@ -74,8 +90,13 @@ def print_accuracy_metrics(name: str, metrics: Dict[str, float]) -> None:
     print(
         f"{name:<10} RMSE={fmt_sci(metrics['rmse'])}"
         f"  MAE={fmt_sci(metrics['mae'])}"
-        f"  MAPE={fmt_percent(metrics['mape_percent'])}%"
-        f"  MaxRelErr={fmt_percent(metrics['max_rel_error_percent'])}%"
+        f"  RelErr[p50/p95/p99]="
+        f"{fmt_percent(metrics['rel_p50_percent'])}/"
+        f"{fmt_percent(metrics['rel_p95_percent'])}/"
+        f"{fmt_percent(metrics['rel_p99_percent'])}%"
+        f"  RelErr(alpha2>={fmt_sci(metrics['relative_error_floor'])})[p50/p95]="
+        f"{fmt_percent(metrics['floor_rel_p50_percent'])}/"
+        f"{fmt_percent(metrics['floor_rel_p95_percent'])}%"
         f"  R2={metrics['r2']:.6f}"
     )
 
@@ -137,6 +158,7 @@ def print_m_outlier_details(
     m_values_full: np.ndarray,
     low: float = 2.0,
     high: float = 4.0,
+    max_rows: int = 50,
 ) -> None:
     true_flat = alpha2_true.reshape(-1)
     pred_flat = alpha2_pred.reshape(-1)
@@ -159,7 +181,8 @@ def print_m_outlier_details(
         "  rel_err_percent"
         "  inferred_m"
     )
-    for idx in outlier_indices:
+    shown_indices = outlier_indices[:max_rows]
+    for idx in shown_indices:
         true_val = float(true_flat[idx])
         pred_val = float(pred_flat[idx])
         rel_err = abs(pred_val - true_val) / (abs(true_val) + 1e-10) * 100.0
@@ -172,6 +195,8 @@ def print_m_outlier_details(
             f"  {rel_err:.6f}"
             f"  {float(m_values_full[idx]):.6e}"
         )
+    if len(outlier_indices) > max_rows:
+        print(f"  ... showing first {max_rows} of {len(outlier_indices)} inferred-m outliers")
 
 
 def configure_matplotlib_for_latex(plt) -> None:
@@ -188,9 +213,9 @@ def configure_matplotlib_for_latex(plt) -> None:
 
 
 def save_matplotlib_figure(fig, path: Path) -> None:
-    pdf_path = path.with_suffix(".pdf")
-    fig.savefig(pdf_path, bbox_inches="tight")
-    print(f"Saved {pdf_path}")
+    png_path = path.with_suffix(".png")
+    fig.savefig(png_path, bbox_inches="tight", dpi=200)
+    print(f"Saved {png_path}")
 
 
 def _svg_scale(value: float, src_min: float, src_max: float, dst_min: float, dst_max: float) -> float:
@@ -367,8 +392,8 @@ def save_accuracy_outputs(
         configure_matplotlib_for_latex(plt)
     except ModuleNotFoundError:
         print(
-            "matplotlib is not installed; skipping PDF plot generation. "
-            "Install it with `python3 -m pip install matplotlib` for PDF output."
+            "matplotlib is not installed; skipping PNG plot generation. "
+            "Install it with `python3 -m pip install matplotlib` for PNG output."
         )
         return
 
@@ -391,7 +416,7 @@ def save_accuracy_outputs(
     ax.set_title("Prediction Scatter")
     ax.legend(frameon=False)
     fig.tight_layout()
-    scatter_path = out_dir / "prediction_scatter.pdf"
+    scatter_path = out_dir / "prediction_scatter.png"
     save_matplotlib_figure(fig, scatter_path)
     plt.close(fig)
 
@@ -403,7 +428,7 @@ def save_accuracy_outputs(
     ax.set_ylabel("Count")
     ax.set_title("Test Error Histogram")
     fig.tight_layout()
-    hist_path = out_dir / "test_error_histogram.pdf"
+    hist_path = out_dir / "test_error_histogram.png"
     save_matplotlib_figure(fig, hist_path)
     plt.close(fig)
 
@@ -420,7 +445,7 @@ def save_accuracy_outputs(
     ax.set_title(f"Loss Curves (seed {best_seed})")
     ax.legend(frameon=False)
     fig.tight_layout()
-    loss_path = out_dir / "loss_curves.pdf"
+    loss_path = out_dir / "loss_curves.png"
     save_matplotlib_figure(fig, loss_path)
     plt.close(fig)
 
@@ -431,6 +456,6 @@ def save_accuracy_outputs(
         ax.set_ylabel("Count")
         ax.set_title(r"Inferred $m$ Histogram (test)")
         fig.tight_layout()
-        m_path = out_dir / "inferred_m_histogram.pdf"
+        m_path = out_dir / "inferred_m_histogram.png"
         save_matplotlib_figure(fig, m_path)
         plt.close(fig)
