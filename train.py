@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import csv
 import math
-import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +39,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, TensorDataset
 
 from accuracy_reports import (
     compute_accuracy_metrics,
@@ -56,12 +55,9 @@ from preprocessing import (
     inverse_transform_y_torch,
     normalize_x_np,
     normalize_y_np,
-    raw_outlier_filter_mask,
-    target_balanced_sample_weights,
     transform_x_np,
     transform_x_torch,
     transform_y_np,
-    velocity_focused_sample_weights,
 )
 
 
@@ -95,37 +91,6 @@ def fmt_seq(values: List[float]) -> str:
 
 def fmt_percent(value: float) -> str:
     return f"{float(value):.6f}"
-
-
-def transform_sampling_target(
-    y_raw: np.ndarray,
-    mode: str,
-    y_floor: np.ndarray,
-) -> np.ndarray:
-    y = np.asarray(y_raw, dtype=np.float64).reshape(len(y_raw), -1)
-    if mode == "raw":
-        return y[:, 0]
-    if mode == "sqrt":
-        return np.sqrt(np.maximum(y[:, 0], 0.0))
-    if mode == "log":
-        return np.log(np.maximum(y[:, 0], y_floor[0]))
-    raise RuntimeError(f"Unsupported sampling target transform: {mode}")
-
-
-def transform_sampling_velocity(
-    x_raw: np.ndarray,
-    mode: str,
-    x_floor: np.ndarray,
-) -> np.ndarray:
-    x = np.asarray(x_raw, dtype=np.float64).reshape(len(x_raw), -1)
-    velocity = x[:, 1]
-    if mode == "raw":
-        return velocity
-    if mode == "sqrt":
-        return np.sqrt(np.maximum(velocity, 0.0))
-    if mode == "log":
-        return np.log(np.maximum(velocity, x_floor[1]))
-    raise RuntimeError(f"Unsupported sampling velocity transform: {mode}")
 
 
 def describe_device(device: torch.device) -> str:
@@ -258,48 +223,125 @@ def to_numpy(data: List[FrictionSample]) -> Tuple[np.ndarray, np.ndarray]:
     return x, y
 
 
-def parse_outlier_columns(columns: str) -> Tuple[str, ...]:
-    parsed = tuple(item.strip() for item in columns.split(",") if item.strip())
-    if not parsed:
-        raise RuntimeError("--outlier-columns must include at least one column")
-    return parsed
-
-
-def filter_outlier_samples(
+def filter_min_vmag_samples(
     data: List[FrictionSample],
-    mode: str,
-    columns: Tuple[str, ...],
-    lower_percentile: float,
-    upper_percentile: float,
-    min_c2: float | None,
-    max_c2: float | None,
-    min_vmag: float | None,
-    max_vmag: float | None,
-    min_alpha2: float | None,
-    max_alpha2: float | None,
-) -> Tuple[List[FrictionSample], Dict[str, Tuple[float, float]], int]:
-    if mode == "none":
-        return data, {}, 0
-
-    x_raw, y_raw = to_numpy(data)
-    result = raw_outlier_filter_mask(
-        x_raw,
-        y_raw,
-        columns=columns,
-        mode=mode,
-        lower_percentile=lower_percentile,
-        upper_percentile=upper_percentile,
-        absolute_bounds={
-            "C2": (min_c2, max_c2),
-            "vmag": (min_vmag, max_vmag),
-            "alpha2": (min_alpha2, max_alpha2),
-        },
-    )
-    filtered = [sample for sample, keep in zip(data, result.mask) if bool(keep)]
+    min_vmag: float,
+) -> Tuple[List[FrictionSample], int]:
+    filtered = [sample for sample in data if sample.x[1] >= min_vmag]
     removed = len(data) - len(filtered)
     if not filtered:
-        raise RuntimeError("Outlier filtering removed all samples.")
-    return filtered, result.bounds, removed
+        raise RuntimeError(f"Velocity filter removed all samples with vmag < {min_vmag:.6e}.")
+    print(
+        f"Velocity filter kept {len(filtered)} of {len(data)} samples; "
+        f"removed {removed} with vmag < {min_vmag:.6e}."
+    )
+    return filtered, removed
+
+
+def sqrt_joint_sample_indices(
+    x_raw: np.ndarray,
+    n_samples: int,
+    c2_bins: int,
+    vmag_bins: int,
+    seed: int,
+) -> np.ndarray:
+    if n_samples <= 0:
+        raise RuntimeError("--train-samples must be > 0")
+
+    x = np.asarray(x_raw, dtype=np.float64).reshape(len(x_raw), -1)
+    c2 = np.sqrt(np.maximum(x[:, 0], 0.0))
+    vmag = np.sqrt(np.maximum(x[:, 1], 0.0))
+    finite_mask = np.isfinite(c2) & np.isfinite(vmag)
+    finite_indices = np.flatnonzero(finite_mask)
+    if len(finite_indices) == 0:
+        raise RuntimeError("No finite sqrt(C2), sqrt(vmag) pairs for training sampling.")
+
+    rng = np.random.default_rng(seed)
+    if n_samples >= len(finite_indices):
+        return rng.permutation(finite_indices)
+
+    c2_finite = c2[finite_mask]
+    vmag_finite = vmag[finite_mask]
+    c2_edges = np.linspace(float(c2_finite.min()), float(c2_finite.max()), c2_bins + 1)
+    vmag_edges = np.linspace(float(vmag_finite.min()), float(vmag_finite.max()), vmag_bins + 1)
+
+    c2_ids = np.digitize(c2, c2_edges[1:-1], right=False)
+    vmag_ids = np.digitize(vmag, vmag_edges[1:-1], right=False)
+    joint_ids = c2_ids * vmag_bins + vmag_ids
+    n_joint_bins = c2_bins * vmag_bins
+
+    counts = np.bincount(joint_ids[finite_mask], minlength=n_joint_bins).astype(np.float64)
+    occupied = counts > 0
+    if not np.any(occupied):
+        raise RuntimeError("No occupied sqrt(C2), sqrt(vmag) bins were found for training sampling.")
+
+    bin_weights = np.zeros(n_joint_bins, dtype=np.float64)
+    bin_weights[occupied] = 1.0 / counts[occupied]
+    sample_weights = np.where(finite_mask, bin_weights[joint_ids], 0.0)
+    if sample_weights.sum() <= 0.0:
+        raise RuntimeError("Joint training sampling weights sum to zero.")
+
+    return rng.choice(
+        len(x),
+        size=n_samples,
+        replace=False,
+        p=sample_weights / sample_weights.sum(),
+    )
+
+
+def sqrt_joint_sample_training_data(
+    data: List[FrictionSample],
+    n_samples: int,
+    c2_bins: int,
+    vmag_bins: int,
+    seed: int,
+) -> List[FrictionSample]:
+    x_raw, _ = to_numpy(data)
+    indices = sqrt_joint_sample_indices(
+        x_raw,
+        n_samples=min(n_samples, len(data)),
+        c2_bins=c2_bins,
+        vmag_bins=vmag_bins,
+        seed=seed,
+    )
+    sampled = [data[int(i)] for i in indices]
+    print(
+        f"Joint train sampler kept {len(sampled)} of {len(data)} training samples "
+        f"using {c2_bins} sqrt(C2) bins x {vmag_bins} sqrt(vmag) bins."
+    )
+    return sampled
+
+
+def print_regime_metrics(
+    split_name: str,
+    x_raw: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    slow_vmag: float,
+    fast_vmag: float,
+) -> None:
+    c2 = np.asarray(x_raw, dtype=np.float64)[:, 0]
+    vmag = np.asarray(x_raw, dtype=np.float64)[:, 1]
+    c2_q25 = float(np.percentile(c2, 25.0))
+    c2_q75 = float(np.percentile(c2, 75.0))
+    regimes = {
+        f"slow_v<{slow_vmag:.1e}": vmag < slow_vmag,
+        f"medium_{slow_vmag:.1e}-{fast_vmag:.1e}": (vmag >= slow_vmag) & (vmag < fast_vmag),
+        f"fast_v>={fast_vmag:.1e}": vmag >= fast_vmag,
+        "low_C2_q25": c2 <= c2_q25,
+        "high_C2_q75": c2 >= c2_q75,
+        "fast_low_C2": (vmag >= fast_vmag) & (c2 <= c2_q25),
+    }
+
+    print(f"\n{split_name} regime metrics")
+    print("-" * (len(split_name) + 15))
+    for name, mask in regimes.items():
+        count = int(np.count_nonzero(mask))
+        if count == 0:
+            print(f"{name:<28} n=0")
+            continue
+        metrics = compute_accuracy_metrics(y_true[mask], y_pred[mask])
+        print_accuracy_metrics(f"{name} n={count}", metrics)
 
 
 # -----------------------------------------------------------------------------
@@ -547,13 +589,6 @@ def train_one_seed(
     lr_factor: float,
     lr_min: float,
     lr_threshold: float,
-    sampling: str,
-    balanced_target_bins: int,
-    balanced_velocity_bins: int,
-    balanced_power: float,
-    balanced_max_weight: float,
-    sampling_target_transform: str,
-    sampling_velocity_transform: str,
     device: torch.device,
 ) -> Tuple[FrictionMLP, float, List[Dict[str, float]]]:
     set_seed(seed)
@@ -584,68 +619,14 @@ def train_one_seed(
     g = torch.Generator()
     g.manual_seed(seed)
 
-    sampler = None
-    shuffle = True
-    if sampling == "target-balanced":
-        target = transform_sampling_target(train_y_raw, sampling_target_transform, norm.y_floor)
-        sample_weights = target_balanced_sample_weights(
-            target,
-            n_bins=balanced_target_bins,
-            balance_power=balanced_power,
-            max_weight=balanced_max_weight,
-        )
-        sampler = WeightedRandomSampler(
-            weights=torch.as_tensor(sample_weights, dtype=torch.double),
-            num_samples=len(sample_weights),
-            replacement=True,
-            generator=g,
-        )
-        shuffle = False
-        print(
-            "Target-balanced sampler:"
-            f" target={sampling_target_transform}(alpha2)"
-            f" bins={balanced_target_bins}"
-            f" power={balanced_power:g}"
-            f" max_weight={balanced_max_weight:g}"
-            f" weight_min={sample_weights.min():.3g}"
-            f" weight_median={np.median(sample_weights):.3g}"
-            f" weight_max={sample_weights.max():.3g}"
-        )
-    elif sampling == "velocity-focused":
-        velocity = transform_sampling_velocity(train_x_raw, sampling_velocity_transform, norm.x_floor)
-        sample_weights = velocity_focused_sample_weights(
-            velocity,
-            n_bins=balanced_velocity_bins,
-            focus_power=balanced_power,
-            max_weight=balanced_max_weight,
-        )
-        sampler = WeightedRandomSampler(
-            weights=torch.as_tensor(sample_weights, dtype=torch.double),
-            num_samples=len(sample_weights),
-            replacement=True,
-            generator=g,
-        )
-        shuffle = False
-        print(
-            "Velocity-focused sampler:"
-            f" velocity={sampling_velocity_transform}(|ub|)"
-            f" bins={balanced_velocity_bins}"
-            f" power={balanced_power:g}"
-            f" max_weight={balanced_max_weight:g}"
-            f" weight_min={sample_weights.min():.3g}"
-            f" weight_median={np.median(sample_weights):.3g}"
-            f" weight_max={sample_weights.max():.3g}"
-        )
-
     loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
+        shuffle=True,
         drop_last=False,
         num_workers=0,
         pin_memory=(device.type == "cuda"),
-        generator=None if sampler is not None else g,
+        generator=g,
     )
 
     best_val_rmse = float("inf")
@@ -844,46 +825,27 @@ def main() -> None:
     parser.add_argument("--xgb-max-depth", type=int, default=6)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--plots-dir", type=str, default="./plots")
-    parser.add_argument("--normalization", type=str, default="raw", choices=["raw", "log", "mixed", "sqrt"])
-    parser.add_argument(
-        "--sampling",
-        type=str,
-        default="random",
-        choices=["random", "target-balanced", "velocity-focused"],
-    )
-    parser.add_argument("--balanced-target-bins", type=int, default=20)
-    parser.add_argument("--balanced-velocity-bins", type=int, default=20)
-    parser.add_argument("--balanced-power", type=float, default=0.5)
-    parser.add_argument("--balanced-max-weight", type=float, default=20.0)
-    parser.add_argument("--sampling-target-transform", type=str, default="sqrt", choices=["raw", "log", "sqrt"])
-    parser.add_argument("--sampling-velocity-transform", type=str, default="sqrt", choices=["raw", "log", "sqrt"])
-    parser.add_argument("--outlier-filter", type=str, default="none", choices=["none", "percentile", "absolute"])
-    parser.add_argument("--outlier-columns", type=str, default="C2,alpha2")
-    parser.add_argument("--outlier-lower-percentile", type=float, default=1.0)
-    parser.add_argument("--outlier-upper-percentile", type=float, default=100.0)
-    parser.add_argument("--min-c2", type=float, default=None)
-    parser.add_argument("--max-c2", type=float, default=None)
-    parser.add_argument("--min-vmag", type=float, default=None)
-    parser.add_argument("--max-vmag", type=float, default=None)
-    parser.add_argument("--min-alpha2", type=float, default=None)
-    parser.add_argument("--max-alpha2", type=float, default=None)
-    parser.add_argument("--log-c2-floor", type=float, default=1e-30)
-    parser.add_argument("--log-v-floor", type=float, default=1e-12)
-    parser.add_argument("--log-alpha2-floor", type=float, default=1e-30)
+    parser.add_argument("--min-vmag", type=float, default=5e-8)
+    parser.add_argument("--train-samples", type=int, default=30000)
+    parser.add_argument("--joint-c2-bins", type=int, default=30)
+    parser.add_argument("--joint-vmag-bins", type=int, default=30)
+    parser.add_argument("--joint-sampling-seed", type=int, default=42)
+    parser.add_argument("--slow-vmag-threshold", type=float, default=1e-6)
+    parser.add_argument("--fast-vmag-threshold", type=float, default=1e-5)
     args = parser.parse_args()
 
-    if args.model_type != "mlp" and args.sampling != "random":
-        raise RuntimeError("--sampling is currently implemented for --model-type mlp only")
-    if args.outlier_filter == "percentile" and args.outlier_lower_percentile > args.outlier_upper_percentile:
-        raise RuntimeError("--outlier-lower-percentile must be <= --outlier-upper-percentile")
     if not (0.0 < args.lr_factor < 1.0):
         raise RuntimeError("--lr-factor must be between 0 and 1")
-    if args.balanced_target_bins < 1 or args.balanced_velocity_bins < 1:
-        raise RuntimeError("--balanced-target-bins and --balanced-velocity-bins must be >= 1")
-    if args.balanced_power <= 0.0:
-        raise RuntimeError("--balanced-power must be > 0")
-    if args.balanced_max_weight < 1.0:
-        raise RuntimeError("--balanced-max-weight must be >= 1")
+    if args.min_vmag <= 0.0:
+        raise RuntimeError("--min-vmag must be > 0")
+    if args.train_samples <= 0:
+        raise RuntimeError("--train-samples must be > 0")
+    if args.joint_c2_bins < 1 or args.joint_vmag_bins < 1:
+        raise RuntimeError("--joint-c2-bins and --joint-vmag-bins must be >= 1")
+    if args.slow_vmag_threshold <= args.min_vmag:
+        raise RuntimeError("--slow-vmag-threshold must be greater than --min-vmag")
+    if args.fast_vmag_threshold <= args.slow_vmag_threshold:
+        raise RuntimeError("--fast-vmag-threshold must be greater than --slow-vmag-threshold")
 
     if args.device == "auto":
         if torch.cuda.is_available():
@@ -922,25 +884,18 @@ def main() -> None:
     print(f"XGB file:     {args.xgb_model_file}")
     print(f"Checkpoint:   {args.checkpoint}")
     print(f"Plots dir:    {args.plots_dir}")
-    print(f"Normalization:{args.normalization}")
-    print(f"Sampling:     {args.sampling}")
-    print(f"Outliers:     {args.outlier_filter}")
-    if args.sampling == "target-balanced":
-        print(
-            "Sampling cfg: "
-            f"target={args.sampling_target_transform}(alpha2), "
-            f"bins={args.balanced_target_bins}, "
-            f"power={args.balanced_power:g}, "
-            f"max_weight={args.balanced_max_weight:g}"
-        )
-    elif args.sampling == "velocity-focused":
-        print(
-            "Sampling cfg: "
-            f"velocity={args.sampling_velocity_transform}(|ub|), "
-            f"bins={args.balanced_velocity_bins}, "
-            f"power={args.balanced_power:g}, "
-            f"max_weight={args.balanced_max_weight:g}"
-        )
+    print("Normalization:sqrt")
+    print(f"Min vmag:     {fmt_sci(args.min_vmag)}")
+    print(
+        "Train sample: "
+        f"{args.train_samples} samples, "
+        f"{args.joint_c2_bins} sqrt(C2) bins x {args.joint_vmag_bins} sqrt(vmag) bins"
+    )
+    print(
+        "Regimes:      "
+        f"slow < {fmt_sci(args.slow_vmag_threshold)}, "
+        f"fast >= {fmt_sci(args.fast_vmag_threshold)}"
+    )
     print(
         f"Architecture: {args.in_dim} -> {args.h1} ->"
         f" {args.h2} -> {args.out_dim}"
@@ -952,29 +907,20 @@ def main() -> None:
     if not all_data:
         raise RuntimeError("No data loaded. Exiting.")
 
-    outlier_columns = parse_outlier_columns(args.outlier_columns)
-    all_data, outlier_bounds, removed_outliers = filter_outlier_samples(
-        all_data,
-        mode=args.outlier_filter,
-        columns=outlier_columns,
-        lower_percentile=args.outlier_lower_percentile,
-        upper_percentile=args.outlier_upper_percentile,
-        min_c2=args.min_c2,
-        max_c2=args.max_c2,
-        min_vmag=args.min_vmag,
-        max_vmag=args.max_vmag,
-        min_alpha2=args.min_alpha2,
-        max_alpha2=args.max_alpha2,
-    )
-    if args.outlier_filter != "none":
-        print(
-            f"Outlier filter kept {len(all_data)} samples and removed {removed_outliers} "
-            f"using columns={','.join(outlier_columns)}"
-        )
-        for column, (lower, upper) in outlier_bounds.items():
-            print(f"  {column}: [{lower:.6e}, {upper:.6e}]")
+    x_floor = np.array([1e-30, 1e-12], dtype=np.float64)
+    y_floor = np.array([1e-30], dtype=np.float64)
+
+    all_data, removed_low_vmag = filter_min_vmag_samples(all_data, args.min_vmag)
 
     train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
+    full_train_count = len(train_data)
+    train_data = sqrt_joint_sample_training_data(
+        train_data,
+        n_samples=args.train_samples,
+        c2_bins=args.joint_c2_bins,
+        vmag_bins=args.joint_vmag_bins,
+        seed=args.joint_sampling_seed,
+    )
     if args.in_dim != len(RAW_X_SCALE):
         raise RuntimeError(
             f"Expected in_dim={len(RAW_X_SCALE)} for hard-coded normalization, got {args.in_dim}"
@@ -987,9 +933,7 @@ def main() -> None:
     train_x_raw, train_y_raw = to_numpy(train_data)
     val_x_raw, val_y_raw = to_numpy(val_data)
     test_x_raw, test_y_raw = to_numpy(test_data)
-    x_floor = np.array([args.log_c2_floor, args.log_v_floor], dtype=np.float64)
-    y_floor = np.array([args.log_alpha2_floor], dtype=np.float64)
-    norm = build_normalization_config(args.normalization, train_x_raw, train_y_raw, x_floor, y_floor)
+    norm = build_normalization_config("sqrt", train_x_raw, train_y_raw, x_floor, y_floor)
 
     print(f"x_mean:       {fmt_seq(norm.x_mean.tolist())}")
     print(f"x_std:        {fmt_seq(norm.x_std.tolist())}")
@@ -1027,13 +971,6 @@ def main() -> None:
                 lr_factor=args.lr_factor,
                 lr_min=args.lr_min,
                 lr_threshold=args.lr_threshold,
-                sampling=args.sampling,
-                balanced_target_bins=args.balanced_target_bins,
-                balanced_velocity_bins=args.balanced_velocity_bins,
-                balanced_power=args.balanced_power,
-                balanced_max_weight=args.balanced_max_weight,
-                sampling_target_transform=args.sampling_target_transform,
-                sampling_velocity_transform=args.sampling_velocity_transform,
                 device=device,
             )
             history_by_seed[seed] = history
@@ -1105,6 +1042,22 @@ def main() -> None:
     print_accuracy_metrics("Train", compute_accuracy_metrics(*split_predictions["train"]))
     print_accuracy_metrics("Validation", compute_accuracy_metrics(*split_predictions["validation"]))
     print_accuracy_metrics("Test", compute_accuracy_metrics(*split_predictions["test"]))
+    print_regime_metrics(
+        "Validation",
+        val_x_raw,
+        split_predictions["validation"][0],
+        split_predictions["validation"][1],
+        slow_vmag=args.slow_vmag_threshold,
+        fast_vmag=args.fast_vmag_threshold,
+    )
+    print_regime_metrics(
+        "Test",
+        test_x_raw,
+        split_predictions["test"][0],
+        split_predictions["test"][1],
+        slow_vmag=args.slow_vmag_threshold,
+        fast_vmag=args.fast_vmag_threshold,
+    )
 
     print_sample_predictions(test_data, split_predictions["test"][1], n_samples=5)
     save_accuracy_outputs(args.plots_dir, split_predictions, history_by_seed, best_seed, test_x_raw)
@@ -1120,17 +1073,15 @@ def main() -> None:
         "y_std": norm.y_std.astype(np.float64),
         "x_floor": norm.x_floor.astype(np.float64),
         "y_floor": norm.y_floor.astype(np.float64),
-        "sampling": args.sampling,
-        "sampling_target_transform": args.sampling_target_transform,
-        "sampling_velocity_transform": args.sampling_velocity_transform,
-        "balanced_target_bins": args.balanced_target_bins,
-        "balanced_velocity_bins": args.balanced_velocity_bins,
-        "balanced_power": args.balanced_power,
-        "balanced_max_weight": args.balanced_max_weight,
-        "outlier_filter": args.outlier_filter,
-        "outlier_columns": outlier_columns,
-        "outlier_bounds": outlier_bounds,
-        "removed_outliers": removed_outliers,
+        "min_vmag": args.min_vmag,
+        "removed_low_vmag": removed_low_vmag,
+        "full_train_samples_before_joint_sampling": full_train_count,
+        "train_samples": len(train_data),
+        "joint_c2_bins": args.joint_c2_bins,
+        "joint_vmag_bins": args.joint_vmag_bins,
+        "joint_sampling_seed": args.joint_sampling_seed,
+        "slow_vmag_threshold": args.slow_vmag_threshold,
+        "fast_vmag_threshold": args.fast_vmag_threshold,
         "lr_scheduler": args.lr_scheduler,
         "lr_patience": args.lr_patience,
         "lr_factor": args.lr_factor,
