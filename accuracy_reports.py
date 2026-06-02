@@ -218,6 +218,86 @@ def save_matplotlib_figure(fig, path: Path) -> None:
     print(f"Saved {png_path}")
 
 
+def save_relative_error_heatmap(
+    out_dir: Path,
+    test_x_raw: np.ndarray,
+    test_true: np.ndarray,
+    test_pred: np.ndarray,
+    plt,
+    bins: int = 60,
+) -> None:
+    c2 = np.sqrt(np.maximum(test_x_raw[:, 0].astype(np.float64), 0.0))
+    vmag = np.sqrt(np.maximum(test_x_raw[:, 1].astype(np.float64), 0.0))
+    y_true = test_true.reshape(-1).astype(np.float64)
+    y_pred = test_pred.reshape(-1).astype(np.float64)
+    rel_error_percent = np.abs(y_pred - y_true) / (np.abs(y_true) + 1e-10) * 100.0
+
+    finite = np.isfinite(c2) & np.isfinite(vmag) & np.isfinite(rel_error_percent)
+    c2 = c2[finite]
+    vmag = vmag[finite]
+    rel_error_percent = rel_error_percent[finite]
+    if len(c2) == 0:
+        print("Skipped relative-error heatmap: no finite test points.")
+        return
+
+    c2_edges = np.linspace(float(c2.min()), float(c2.max()), bins + 1)
+    vmag_edges = np.linspace(float(vmag.min()), float(vmag.max()), bins + 1)
+    c2_ids = np.digitize(c2, c2_edges[1:-1], right=False)
+    vmag_ids = np.digitize(vmag, vmag_edges[1:-1], right=False)
+
+    sum_error = np.zeros((bins, bins), dtype=np.float64)
+    counts = np.zeros((bins, bins), dtype=np.float64)
+    np.add.at(sum_error, (vmag_ids, c2_ids), rel_error_percent)
+    np.add.at(counts, (vmag_ids, c2_ids), 1.0)
+    mean_error = np.full((bins, bins), np.nan, dtype=np.float64)
+    occupied = counts > 0
+    mean_error[occupied] = sum_error[occupied] / counts[occupied]
+
+    vmax = float(np.nanpercentile(mean_error, 95.0)) if np.any(occupied) else 1.0
+    vmax = max(vmax, 1.0)
+    fig, ax = plt.subplots(figsize=LATEX_SQUARE_FIGSIZE)
+    mesh = ax.pcolormesh(
+        c2_edges,
+        vmag_edges,
+        mean_error,
+        shading="auto",
+        cmap="magma",
+        vmin=0.0,
+        vmax=vmax,
+    )
+    ax.set_xlabel(r"$\sqrt{C^2}$")
+    ax.set_ylabel(r"$\sqrt{|u_b|}$")
+    ax.set_title("Test Relative Error Heatmap")
+    cbar = fig.colorbar(mesh, ax=ax)
+    cbar.set_label("mean relative error (%)")
+    fig.tight_layout()
+    save_matplotlib_figure(fig, out_dir / "test_relative_error_heatmap.png")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=LATEX_SQUARE_FIGSIZE)
+    sample_count = min(len(c2), 12000)
+    rng = np.random.default_rng(42)
+    sample_idx = rng.choice(len(c2), size=sample_count, replace=False) if sample_count < len(c2) else np.arange(len(c2))
+    scatter_values = np.clip(rel_error_percent[sample_idx], 0.0, float(np.percentile(rel_error_percent, 99.0)))
+    sc = ax.scatter(
+        c2[sample_idx],
+        vmag[sample_idx],
+        c=scatter_values,
+        s=4,
+        alpha=0.55,
+        cmap="magma",
+        linewidths=0,
+    )
+    ax.set_xlabel(r"$\sqrt{C^2}$")
+    ax.set_ylabel(r"$\sqrt{|u_b|}$")
+    ax.set_title("Test Relative Error Scatter")
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("relative error (%), clipped at p99")
+    fig.tight_layout()
+    save_matplotlib_figure(fig, out_dir / "test_relative_error_scatter.png")
+    plt.close(fig)
+
+
 def _svg_scale(value: float, src_min: float, src_max: float, dst_min: float, dst_max: float) -> float:
     if src_max == src_min:
         return 0.5 * (dst_min + dst_max)
@@ -459,3 +539,5 @@ def save_accuracy_outputs(
         m_path = out_dir / "inferred_m_histogram.png"
         save_matplotlib_figure(fig, m_path)
         plt.close(fig)
+
+    save_relative_error_heatmap(out_dir, test_x_raw, test_true, test_pred, plt)
