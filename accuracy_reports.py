@@ -557,6 +557,7 @@ def save_accuracy_outputs(
     test_error = (test_pred - test_true).reshape(-1)
     fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
     ax.hist(test_error, bins=60, alpha=0.85)
+    ax.set_yscale("log")
     ax.axvline(0.0, color="k", linestyle="--", linewidth=0.8)
     fig.tight_layout()
     hist_path = out_dir / "test_error_histogram.png"
@@ -580,6 +581,7 @@ def save_accuracy_outputs(
     if len(m_values) > 0:
         fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
         ax.hist(m_values, bins=60, alpha=0.85)
+        ax.set_yscale("log")
         fig.tight_layout()
         m_path = out_dir / "inferred_m_histogram.png"
         save_matplotlib_figure(fig, m_path)
