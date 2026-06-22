@@ -9,8 +9,8 @@ import torch
 import torch.nn as nn
 
 
-LATEX_FIGSIZE = (3.27, 2.55)  # 8.3 cm wide
-LATEX_SQUARE_FIGSIZE = (3.27, 3.0)
+LATEX_FIGSIZE = (6.0, 4.0)
+LATEX_SQUARE_FIGSIZE = (6.0, 4.0)
 
 
 def save_accuracy_report_data(
@@ -267,12 +267,10 @@ def print_m_outlier_details(
 def configure_matplotlib_for_latex(plt) -> None:
     plt.rcParams.update(
         {
-            "font.size": 8,
-            "axes.labelsize": 8,
-            "axes.titlesize": 9,
-            "xtick.labelsize": 7,
-            "ytick.labelsize": 7,
-            "legend.fontsize": 7,
+            "font.size": 18,
+            "xtick.labelsize": 18,
+            "ytick.labelsize": 18,
+            "legend.fontsize": 18,
         }
     )
 
@@ -330,11 +328,8 @@ def save_relative_error_heatmap(
         vmin=0.0,
         vmax=vmax,
     )
-    ax.set_xlabel(r"$\sqrt{C^2}$")
-    ax.set_ylabel(r"$\sqrt{|u_b|}$")
-    ax.set_title("Test Relative Error Heatmap")
     cbar = fig.colorbar(mesh, ax=ax)
-    cbar.set_label("mean relative error (%)")
+    cbar.ax.tick_params(labelsize=18)
     fig.tight_layout()
     save_matplotlib_figure(fig, out_dir / "test_relative_error_heatmap.png")
     plt.close(fig)
@@ -353,11 +348,8 @@ def save_relative_error_heatmap(
         cmap="magma",
         linewidths=0,
     )
-    ax.set_xlabel(r"$\sqrt{C^2}$")
-    ax.set_ylabel(r"$\sqrt{|u_b|}$")
-    ax.set_title("Test Relative Error Scatter")
     cbar = fig.colorbar(sc, ax=ax)
-    cbar.set_label("relative error (%), clipped at p99")
+    cbar.ax.tick_params(labelsize=18)
     fig.tight_layout()
     save_matplotlib_figure(fig, out_dir / "test_relative_error_scatter.png")
     plt.close(fig)
@@ -556,9 +548,6 @@ def save_accuracy_outputs(
     lo = float(min(np.min(all_true_flat), np.min(all_pred_flat)))
     hi = float(max(np.max(all_true_flat), np.max(all_pred_flat)))
     ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.8, label="ideal")
-    ax.set_xlabel(r"True $\alpha^2$")
-    ax.set_ylabel(r"Predicted $\alpha^2$")
-    ax.set_title("Prediction Scatter")
     ax.legend(frameon=False)
     fig.tight_layout()
     scatter_path = out_dir / "prediction_scatter.png"
@@ -569,9 +558,6 @@ def save_accuracy_outputs(
     fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
     ax.hist(test_error, bins=60, alpha=0.85)
     ax.axvline(0.0, color="k", linestyle="--", linewidth=0.8)
-    ax.set_xlabel(r"Prediction error, $\hat{\alpha}^2-\alpha^2$")
-    ax.set_ylabel("Count")
-    ax.set_title("Test Error Histogram")
     fig.tight_layout()
     hist_path = out_dir / "test_error_histogram.png"
     save_matplotlib_figure(fig, hist_path)
@@ -585,9 +571,6 @@ def save_accuracy_outputs(
     ax.plot(epochs, train_rmse, label="train", linewidth=1.0)
     ax.plot(epochs, val_rmse, label="validation", linewidth=1.0)
     ax.set_yscale("log")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel(r"RMSE of $\alpha^2$")
-    ax.set_title(f"Loss Curves (seed {best_seed})")
     ax.legend(frameon=False)
     fig.tight_layout()
     loss_path = out_dir / "loss_curves.png"
@@ -597,9 +580,6 @@ def save_accuracy_outputs(
     if len(m_values) > 0:
         fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
         ax.hist(m_values, bins=60, alpha=0.85)
-        ax.set_xlabel(r"$m=\ln(|u_b|)/(\ln(\alpha^2/C^2)+\ln(|u_b|))$")
-        ax.set_ylabel("Count")
-        ax.set_title(r"Inferred $m$ Histogram (test)")
         fig.tight_layout()
         m_path = out_dir / "inferred_m_histogram.png"
         save_matplotlib_figure(fig, m_path)
