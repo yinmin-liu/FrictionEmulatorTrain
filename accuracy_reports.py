@@ -13,6 +13,71 @@ LATEX_FIGSIZE = (3.27, 2.55)  # 8.3 cm wide
 LATEX_SQUARE_FIGSIZE = (3.27, 3.0)
 
 
+def save_accuracy_report_data(
+    report_path: str,
+    split_predictions: Dict[str, Tuple[np.ndarray, np.ndarray]],
+    history_by_seed: Dict[int, List[Dict[str, float]]],
+    best_seed: int,
+    test_x_raw: np.ndarray,
+) -> None:
+    history = history_by_seed[best_seed]
+    path = Path(report_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        path,
+        train_true=split_predictions["train"][0],
+        train_pred=split_predictions["train"][1],
+        validation_true=split_predictions["validation"][0],
+        validation_pred=split_predictions["validation"][1],
+        test_true=split_predictions["test"][0],
+        test_pred=split_predictions["test"][1],
+        test_x_raw=test_x_raw,
+        best_seed=np.asarray(best_seed, dtype=np.int64),
+        history_epoch=np.asarray([item["epoch"] for item in history], dtype=np.int64),
+        history_train_rmse=np.asarray(
+            [item["train_rmse"] for item in history], dtype=np.float64
+        ),
+        history_val_rmse=np.asarray(
+            [item["val_rmse"] for item in history], dtype=np.float64
+        ),
+    )
+    print(f"Saved plotting data to {path}")
+
+
+def load_accuracy_report_data(
+    report_path: str,
+) -> tuple[
+    Dict[str, Tuple[np.ndarray, np.ndarray]],
+    Dict[int, List[Dict[str, float]]],
+    int,
+    np.ndarray,
+]:
+    with np.load(report_path, allow_pickle=False) as data:
+        best_seed = int(data["best_seed"])
+        history = [
+            {
+                "epoch": int(epoch),
+                "train_rmse": float(train_rmse),
+                "val_rmse": float(val_rmse),
+            }
+            for epoch, train_rmse, val_rmse in zip(
+                data["history_epoch"],
+                data["history_train_rmse"],
+                data["history_val_rmse"],
+            )
+        ]
+        split_predictions = {
+            "train": (data["train_true"].copy(), data["train_pred"].copy()),
+            "validation": (
+                data["validation_true"].copy(),
+                data["validation_pred"].copy(),
+            ),
+            "test": (data["test_true"].copy(), data["test_pred"].copy()),
+        }
+        test_x_raw = data["test_x_raw"].copy()
+    return split_predictions, {best_seed: history}, best_seed, test_x_raw
+
+
 def fmt_sci(value: float) -> str:
     return f"{float(value):.6e}"
 

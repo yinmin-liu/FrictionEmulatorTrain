@@ -9,10 +9,11 @@ Data format:
 Each CSV row has 3 columns:
   C2, vmag, alpha2
 
-This script does three things:
+This script does four things:
 1. trains an MLP in PyTorch
 2. saves a native PyTorch checkpoint (.pt)
 3. saves a plain-text model file compatible with the existing C++ FrictionEmulator::Load()
+4. saves numerical report data for a separate plotting process
 
 Example:
   python train.py \
@@ -23,7 +24,13 @@ Example:
       --n-seeds 5 \
       --folder ./data \
       --model-file ./friction_emulator.txt \
-      --checkpoint ./friction_emulator.pt
+      --checkpoint ./friction_emulator.pt \
+      --report-data ./training_report_data.npz
+
+Generate plots afterward in a separate process:
+  python plot_training_results.py \
+      --report-data ./training_report_data.npz \
+      --plots-dir ./plots
 """
 
 from __future__ import annotations
@@ -44,7 +51,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from accuracy_reports import (
     compute_accuracy_metrics,
     print_accuracy_metrics,
-    save_accuracy_outputs,
+    save_accuracy_report_data,
 )
 from preprocessing import (
     RAW_X_SCALE,
@@ -824,7 +831,7 @@ def main() -> None:
     parser.add_argument("--xgb-n-estimators", type=int, default=500)
     parser.add_argument("--xgb-max-depth", type=int, default=6)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
-    parser.add_argument("--plots-dir", type=str, default="./plots")
+    parser.add_argument("--report-data", type=str, default="./training_report_data.npz")
     parser.add_argument("--min-vmag", type=float, default=5e-8)
     parser.add_argument("--train-samples", type=int, default=30000)
     parser.add_argument("--joint-c2-bins", type=int, default=30)
@@ -883,7 +890,7 @@ def main() -> None:
     print(f"Model file:   {args.model_file}")
     print(f"XGB file:     {args.xgb_model_file}")
     print(f"Checkpoint:   {args.checkpoint}")
-    print(f"Plots dir:    {args.plots_dir}")
+    print(f"Report data:  {args.report_data}")
     print("Normalization:sqrt")
     print(f"Min vmag:     {fmt_sci(args.min_vmag)}")
     print(
@@ -1060,7 +1067,13 @@ def main() -> None:
     )
 
     print_sample_predictions(test_data, split_predictions["test"][1], n_samples=5)
-    save_accuracy_outputs(args.plots_dir, split_predictions, history_by_seed, best_seed, test_x_raw)
+    save_accuracy_report_data(
+        args.report_data,
+        split_predictions,
+        history_by_seed,
+        best_seed,
+        test_x_raw,
+    )
 
     common_metadata = {
         "model_type": args.model_type,
