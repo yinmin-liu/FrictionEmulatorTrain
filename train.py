@@ -58,10 +58,7 @@ from preprocessing import (
     RAW_Y_SCALE,
     NormalizationConfig,
     build_normalization_config,
-    denormalize_y_np,
     inverse_transform_y_torch,
-    normalize_x_np,
-    normalize_y_np,
     transform_x_np,
     transform_x_torch,
     transform_y_np,
@@ -443,23 +440,6 @@ def predict_raw(
     return np.concatenate(preds, axis=0)
 
 
-def predict_xgboost_raw(model, x_raw: np.ndarray, norm: NormalizationConfig, iteration: int | None = None) -> np.ndarray:
-    import xgboost as xgb
-
-    x_norm = normalize_x_np(x_raw, norm).astype(np.float32)
-    dmat = xgb.DMatrix(x_norm)
-    kwargs = {}
-    if iteration is not None:
-        kwargs["iteration_range"] = (0, iteration)
-    pred_norm = np.asarray(model.predict(dmat, **kwargs), dtype=np.float64).reshape(-1, len(norm.y_mean))
-    return denormalize_y_np(pred_norm, norm)
-
-
-def compute_rmse_from_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    err = y_pred - y_true
-    return float(np.sqrt(np.mean(err * err)))
-
-
 @torch.no_grad()
 def print_mlp_samples(
     model: FrictionMLP,
@@ -722,87 +702,6 @@ def train_one_seed(
     return model, final_val_rmse, history
 
 
-def train_xgboost(
-    train_x_raw: np.ndarray,
-    train_y_raw: np.ndarray,
-    val_x_raw: np.ndarray,
-    val_y_raw: np.ndarray,
-    norm: NormalizationConfig,
-    n_estimators: int,
-    max_depth: int,
-    lr: float,
-    print_every: int,
-    seed: int,
-    device: torch.device,
-):
-    try:
-        import xgboost as xgb
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "XGBoost is not installed. Install it or run with --model-type mlp."
-        ) from exc
-
-    train_x = normalize_x_np(train_x_raw, norm).astype(np.float32)
-    train_y = normalize_y_np(train_y_raw, norm).astype(np.float32).reshape(-1)
-    val_x = normalize_x_np(val_x_raw, norm).astype(np.float32)
-    val_y = normalize_y_np(val_y_raw, norm).astype(np.float32).reshape(-1)
-
-    xgb_device = "cuda" if device.type == "cuda" else "cpu"
-    params = {
-        "objective": "reg:squarederror",
-        "eval_metric": "rmse",
-        "max_depth": max_depth,
-        "eta": lr,
-        "tree_method": "hist",
-        "device": xgb_device,
-        "subsample": 1.0,
-        "colsample_bytree": 1.0,
-        "seed": seed,
-    }
-    dtrain = xgb.DMatrix(train_x, label=train_y)
-    dval = xgb.DMatrix(val_x, label=val_y)
-
-    print("\n==============================")
-    print("XGBoost")
-    print("==============================")
-    model = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=n_estimators,
-        evals=[(dtrain, "train"), (dval, "validation")],
-        verbose_eval=False,
-    )
-
-    history = []
-    checkpoints = sorted(set(list(range(1, n_estimators + 1, print_every)) + [n_estimators]))
-    best_val_rmse = float("inf")
-    best_iteration = n_estimators
-    for iteration in checkpoints:
-        train_pred = predict_xgboost_raw(model, train_x_raw, norm, iteration=iteration)
-        val_pred = predict_xgboost_raw(model, val_x_raw, norm, iteration=iteration)
-        train_rmse = compute_rmse_from_predictions(train_y_raw, train_pred)
-        val_rmse = compute_rmse_from_predictions(val_y_raw, val_pred)
-        epoch = iteration - 1
-        print(
-            f"Round {epoch}  Train RMSE = {fmt_sci(train_rmse)}"
-            f"  Val RMSE = {fmt_sci(val_rmse)}"
-        )
-        history.append(
-            {
-                "epoch": float(epoch),
-                "train_rmse": float(train_rmse),
-                "val_rmse": float(val_rmse),
-                "train_mse_norm": float("nan"),
-            }
-        )
-        if val_rmse < best_val_rmse:
-            best_val_rmse = val_rmse
-            best_iteration = iteration
-
-    print(f"XGBoost final Val RMSE = {fmt_sci(best_val_rmse)}")
-    return model, best_val_rmse, history, best_iteration
-
-
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
@@ -811,8 +710,6 @@ def main() -> None:
     parser.add_argument("--folder", type=str, default="./data")
     parser.add_argument("--model-file", type=str, default="./friction_emulator.txt")
     parser.add_argument("--checkpoint", type=str, default="./friction_emulator.pt")
-    parser.add_argument("--xgb-model-file", type=str, default="./friction_emulator_xgboost.json")
-    parser.add_argument("--model-type", type=str, default="mlp", choices=["mlp", "xgboost"])
     parser.add_argument("--n-ranks", type=int, default=1)
     parser.add_argument("--in-dim", type=int, default=2)
     parser.add_argument("--out-dim", type=int, default=1)
@@ -828,8 +725,6 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--n-seeds", type=int, default=5)
     parser.add_argument("--print-every", type=int, default=100)
-    parser.add_argument("--xgb-n-estimators", type=int, default=500)
-    parser.add_argument("--xgb-max-depth", type=int, default=6)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--report-data", type=str, default="./training_report_data.npz")
     parser.add_argument("--min-vmag", type=float, default=5e-8)
@@ -886,9 +781,7 @@ def main() -> None:
         )
     print(f"Batch size:   {args.batch_size}")
     print(f"N seeds:      {args.n_seeds}")
-    print(f"Model type:   {args.model_type}")
     print(f"Model file:   {args.model_file}")
-    print(f"XGB file:     {args.xgb_model_file}")
     print(f"Checkpoint:   {args.checkpoint}")
     print(f"Report data:  {args.report_data}")
     print("Normalization:sqrt")
@@ -953,59 +846,38 @@ def main() -> None:
     best_model = None
     best_val_rmse = float("inf")
     best_seed = None
-    best_iteration = None
     history_by_seed: Dict[int, List[Dict[str, float]]] = {}
 
-    if args.model_type == "mlp":
-        for seed in range(args.n_seeds):
-            model, val_rmse, history = train_one_seed(
-                seed=seed,
-                train_x_raw=train_x_raw,
-                train_y_raw=train_y_raw,
-                val_x_raw=val_x_raw,
-                val_y_raw=val_y_raw,
-                norm=norm,
-                in_dim=args.in_dim,
-                h1=args.h1,
-                h2=args.h2,
-                out_dim=args.out_dim,
-                epochs=args.epochs,
-                lr=args.lr,
-                batch_size=args.batch_size,
-                print_every=args.print_every,
-                lr_scheduler=args.lr_scheduler,
-                lr_patience=args.lr_patience,
-                lr_factor=args.lr_factor,
-                lr_min=args.lr_min,
-                lr_threshold=args.lr_threshold,
-                device=device,
-            )
-            history_by_seed[seed] = history
-
-            if val_rmse < best_val_rmse:
-                best_val_rmse = val_rmse
-                best_model = model.cpu()
-                best_seed = seed
-                print(f"--> New best model at seed {seed}")
-    else:
-        model, val_rmse, history, best_iteration = train_xgboost(
+    for seed in range(args.n_seeds):
+        model, val_rmse, history = train_one_seed(
+            seed=seed,
             train_x_raw=train_x_raw,
             train_y_raw=train_y_raw,
             val_x_raw=val_x_raw,
             val_y_raw=val_y_raw,
             norm=norm,
-            n_estimators=args.xgb_n_estimators,
-            max_depth=args.xgb_max_depth,
+            in_dim=args.in_dim,
+            h1=args.h1,
+            h2=args.h2,
+            out_dim=args.out_dim,
+            epochs=args.epochs,
             lr=args.lr,
+            batch_size=args.batch_size,
             print_every=args.print_every,
-            seed=0,
+            lr_scheduler=args.lr_scheduler,
+            lr_patience=args.lr_patience,
+            lr_factor=args.lr_factor,
+            lr_min=args.lr_min,
+            lr_threshold=args.lr_threshold,
             device=device,
         )
-        best_val_rmse = val_rmse
-        best_model = model
-        best_seed = 0
-        history_by_seed[best_seed] = history
-        print(f"--> New best XGBoost model at round {best_iteration - 1}")
+        history_by_seed[seed] = history
+
+        if val_rmse < best_val_rmse:
+            best_val_rmse = val_rmse
+            best_model = model.cpu()
+            best_seed = seed
+            print(f"--> New best model at seed {seed}")
 
     assert best_model is not None
     assert best_seed is not None
@@ -1015,36 +887,20 @@ def main() -> None:
     print("========================================")
 
     eval_device = torch.device("cpu")
-    if args.model_type == "mlp":
-        split_predictions = {
-            "train": (
-                train_y_raw,
-                predict_raw(best_model, train_x_raw, norm, eval_device, args.batch_size),
-            ),
-            "validation": (
-                val_y_raw,
-                predict_raw(best_model, val_x_raw, norm, eval_device, args.batch_size),
-            ),
-            "test": (
-                test_y_raw,
-                predict_raw(best_model, test_x_raw, norm, eval_device, args.batch_size),
-            ),
-        }
-    else:
-        split_predictions = {
-            "train": (
-                train_y_raw,
-                predict_xgboost_raw(best_model, train_x_raw, norm, iteration=best_iteration),
-            ),
-            "validation": (
-                val_y_raw,
-                predict_xgboost_raw(best_model, val_x_raw, norm, iteration=best_iteration),
-            ),
-            "test": (
-                test_y_raw,
-                predict_xgboost_raw(best_model, test_x_raw, norm, iteration=best_iteration),
-            ),
-        }
+    split_predictions = {
+        "train": (
+            train_y_raw,
+            predict_raw(best_model, train_x_raw, norm, eval_device, args.batch_size),
+        ),
+        "validation": (
+            val_y_raw,
+            predict_raw(best_model, val_x_raw, norm, eval_device, args.batch_size),
+        ),
+        "test": (
+            test_y_raw,
+            predict_raw(best_model, test_x_raw, norm, eval_device, args.batch_size),
+        ),
+    }
 
     print_accuracy_metrics("Train", compute_accuracy_metrics(*split_predictions["train"]))
     print_accuracy_metrics("Validation", compute_accuracy_metrics(*split_predictions["validation"]))
@@ -1076,7 +932,6 @@ def main() -> None:
     )
 
     common_metadata = {
-        "model_type": args.model_type,
         "in_dim": args.in_dim,
         "out_dim": args.out_dim,
         "normalization": norm.mode,
@@ -1101,29 +956,15 @@ def main() -> None:
         "lr_min": args.lr_min,
         "lr_threshold": args.lr_threshold,
     }
-    if args.model_type == "mlp":
-        checkpoint = {
-            **common_metadata,
-            "state_dict": best_model.state_dict(),
-            "h1": args.h1,
-            "h2": args.h2,
-        }
-        torch.save(checkpoint, args.checkpoint)
-        print(f"Saved PyTorch checkpoint to {args.checkpoint}")
-        export_to_cpp_text(best_model, norm, args.model_file)
-    else:
-        best_model.save_model(args.xgb_model_file)
-        checkpoint = {
-            **common_metadata,
-            "xgb_model_file": args.xgb_model_file,
-            "xgb_n_estimators": args.xgb_n_estimators,
-            "xgb_max_depth": args.xgb_max_depth,
-            "best_iteration": best_iteration,
-        }
-        torch.save(checkpoint, args.checkpoint)
-        print(f"Saved XGBoost model to {args.xgb_model_file}")
-        print(f"Saved XGBoost metadata checkpoint to {args.checkpoint}")
-        print("Skipped C++ text export: friction_emulator.txt is currently an MLP-only format.")
+    checkpoint = {
+        **common_metadata,
+        "state_dict": best_model.state_dict(),
+        "h1": args.h1,
+        "h2": args.h2,
+    }
+    torch.save(checkpoint, args.checkpoint)
+    print(f"Saved PyTorch checkpoint to {args.checkpoint}")
+    export_to_cpp_text(best_model, norm, args.model_file)
     print("\nDone.")
 
 

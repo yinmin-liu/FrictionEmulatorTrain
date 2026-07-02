@@ -320,3 +320,56 @@ def velocity_focused_sample_weights(
     if sample_weights.sum() <= 0.0:
         raise RuntimeError("Velocity-focused sampling weights sum to zero.")
     return sample_weights.astype(np.float64)
+
+
+def normal_distributed_subset_indices(
+    values: np.ndarray,
+    n_bins: int,
+    n_samples: int,
+    center_quantile: float,
+    sigma_fraction: float,
+    tail_weight: float,
+    seed: int,
+) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    finite_mask = np.isfinite(values)
+    finite_values = values[finite_mask]
+    if len(finite_values) == 0:
+        raise RuntimeError("Dataset sampling variable has no finite values.")
+
+    finite_indices = np.flatnonzero(finite_mask)
+    if n_samples >= len(finite_indices):
+        rng = np.random.default_rng(seed)
+        return rng.permutation(finite_indices)
+
+    vmin = float(finite_values.min())
+    vmax = float(finite_values.max())
+    if vmax <= vmin:
+        rng = np.random.default_rng(seed)
+        return rng.choice(finite_indices, size=n_samples, replace=False)
+
+    edges = np.linspace(vmin, vmax, n_bins + 1)
+    bin_ids = np.digitize(values, edges[1:-1], right=False)
+    counts = np.bincount(bin_ids[finite_mask], minlength=n_bins).astype(np.float64)
+    occupied = counts > 0
+    if not np.any(occupied):
+        raise RuntimeError("No occupied bins were found for normal-distributed dataset sampling.")
+
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    center = float(np.percentile(finite_values, center_quantile * 100.0))
+    sigma = max((vmax - vmin) * sigma_fraction, 1e-12)
+    desired_bin_mass = tail_weight + np.exp(-0.5 * np.square((centers - center) / sigma))
+
+    bin_weights = np.zeros(n_bins, dtype=np.float64)
+    bin_weights[occupied] = desired_bin_mass[occupied] / counts[occupied]
+    sample_weights = np.where(finite_mask, bin_weights[bin_ids], 0.0)
+    if sample_weights.sum() <= 0.0:
+        raise RuntimeError("Normal-distributed dataset sampling weights sum to zero.")
+
+    rng = np.random.default_rng(seed)
+    return rng.choice(
+        len(values),
+        size=n_samples,
+        replace=False,
+        p=sample_weights / sample_weights.sum(),
+    )
