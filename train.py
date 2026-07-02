@@ -727,8 +727,28 @@ def main() -> None:
     parser.add_argument("--print-every", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--report-data", type=str, default="./training_report_data.npz")
+    parser.add_argument(
+        "--normalization",
+        type=str,
+        default="sqrt",
+        choices=["raw", "sqrt", "log", "mixed"],
+        help=(
+            "Input/output preprocessing before scaling. "
+            "'raw' applies only the hard-coded raw scaling constants."
+        ),
+    )
     parser.add_argument("--min-vmag", type=float, default=5e-8)
+    parser.add_argument(
+        "--disable-vmag-filter",
+        action="store_true",
+        help="Keep all rows instead of removing rows with vmag below --min-vmag.",
+    )
     parser.add_argument("--train-samples", type=int, default=30000)
+    parser.add_argument(
+        "--disable-joint-sampling",
+        action="store_true",
+        help="Use the full training split instead of sqrt(C2),sqrt(vmag) joint sampling.",
+    )
     parser.add_argument("--joint-c2-bins", type=int, default=30)
     parser.add_argument("--joint-vmag-bins", type=int, default=30)
     parser.add_argument("--joint-sampling-seed", type=int, default=42)
@@ -744,8 +764,10 @@ def main() -> None:
         raise RuntimeError("--train-samples must be > 0")
     if args.joint_c2_bins < 1 or args.joint_vmag_bins < 1:
         raise RuntimeError("--joint-c2-bins and --joint-vmag-bins must be >= 1")
-    if args.slow_vmag_threshold <= args.min_vmag:
+    if not args.disable_vmag_filter and args.slow_vmag_threshold <= args.min_vmag:
         raise RuntimeError("--slow-vmag-threshold must be greater than --min-vmag")
+    if args.slow_vmag_threshold <= 0.0:
+        raise RuntimeError("--slow-vmag-threshold must be > 0")
     if args.fast_vmag_threshold <= args.slow_vmag_threshold:
         raise RuntimeError("--fast-vmag-threshold must be greater than --slow-vmag-threshold")
 
@@ -784,13 +806,19 @@ def main() -> None:
     print(f"Model file:   {args.model_file}")
     print(f"Checkpoint:   {args.checkpoint}")
     print(f"Report data:  {args.report_data}")
-    print("Normalization:sqrt")
-    print(f"Min vmag:     {fmt_sci(args.min_vmag)}")
-    print(
-        "Train sample: "
-        f"{args.train_samples} samples, "
-        f"{args.joint_c2_bins} sqrt(C2) bins x {args.joint_vmag_bins} sqrt(vmag) bins"
-    )
+    print(f"Normalization:{args.normalization}")
+    if args.disable_vmag_filter:
+        print("Min vmag:     disabled")
+    else:
+        print(f"Min vmag:     {fmt_sci(args.min_vmag)}")
+    if args.disable_joint_sampling:
+        print("Train sample: disabled; using full training split")
+    else:
+        print(
+            "Train sample: "
+            f"{args.train_samples} samples, "
+            f"{args.joint_c2_bins} sqrt(C2) bins x {args.joint_vmag_bins} sqrt(vmag) bins"
+        )
     print(
         "Regimes:      "
         f"slow < {fmt_sci(args.slow_vmag_threshold)}, "
@@ -810,17 +838,22 @@ def main() -> None:
     x_floor = np.array([1e-30, 1e-12], dtype=np.float64)
     y_floor = np.array([1e-30], dtype=np.float64)
 
-    all_data, removed_low_vmag = filter_min_vmag_samples(all_data, args.min_vmag)
+    removed_low_vmag = 0
+    if not args.disable_vmag_filter:
+        all_data, removed_low_vmag = filter_min_vmag_samples(all_data, args.min_vmag)
 
     train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
     full_train_count = len(train_data)
-    train_data = sqrt_joint_sample_training_data(
-        train_data,
-        n_samples=args.train_samples,
-        c2_bins=args.joint_c2_bins,
-        vmag_bins=args.joint_vmag_bins,
-        seed=args.joint_sampling_seed,
-    )
+    if not args.disable_joint_sampling:
+        train_data = sqrt_joint_sample_training_data(
+            train_data,
+            n_samples=args.train_samples,
+            c2_bins=args.joint_c2_bins,
+            vmag_bins=args.joint_vmag_bins,
+            seed=args.joint_sampling_seed,
+        )
+    else:
+        print(f"Joint train sampler disabled; using all {len(train_data)} training samples.")
     if args.in_dim != len(RAW_X_SCALE):
         raise RuntimeError(
             f"Expected in_dim={len(RAW_X_SCALE)} for hard-coded normalization, got {args.in_dim}"
@@ -833,7 +866,7 @@ def main() -> None:
     train_x_raw, train_y_raw = to_numpy(train_data)
     val_x_raw, val_y_raw = to_numpy(val_data)
     test_x_raw, test_y_raw = to_numpy(test_data)
-    norm = build_normalization_config("sqrt", train_x_raw, train_y_raw, x_floor, y_floor)
+    norm = build_normalization_config(args.normalization, train_x_raw, train_y_raw, x_floor, y_floor)
 
     print(f"x_mean:       {fmt_seq(norm.x_mean.tolist())}")
     print(f"x_std:        {fmt_seq(norm.x_std.tolist())}")
@@ -942,9 +975,11 @@ def main() -> None:
         "x_floor": norm.x_floor.astype(np.float64),
         "y_floor": norm.y_floor.astype(np.float64),
         "min_vmag": args.min_vmag,
+        "vmag_filter_enabled": not args.disable_vmag_filter,
         "removed_low_vmag": removed_low_vmag,
         "full_train_samples_before_joint_sampling": full_train_count,
         "train_samples": len(train_data),
+        "joint_sampling_enabled": not args.disable_joint_sampling,
         "joint_c2_bins": args.joint_c2_bins,
         "joint_vmag_bins": args.joint_vmag_bins,
         "joint_sampling_seed": args.joint_sampling_seed,
