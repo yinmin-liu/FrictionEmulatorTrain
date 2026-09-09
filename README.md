@@ -140,29 +140,6 @@ Inputs have shape `(N, 2)` in the original data units; predictions have shape
 Only load trusted checkpoints: this helper uses `torch.load` with
 `weights_only=False`.
 
-## External model integration
-
-This repository provides the Python training and inference workflow. The C++
-emulator loader referenced by the training exporter is not included.
-Reproducing a coupled ISSM simulation also requires the matching external
-[ISSM source](https://github.com/ISSMteam/ISSM), integration changes, model
-configuration, and input data.
-
-## Citation and manuscript release
-
-Citation metadata is provided in `CITATION.cff`. A release DOI has not yet been
-added. For the manuscript, archive the exact release on Zenodo and cite its
-version-specific DOI. Add the DOI here after publication of the archive.
-
-Before the release, complete the dataset provenance and units, identify the
-checkpoint and commands used for each manuscript result, record the software
-environment, and archive any additional simulation inputs and figure scripts.
-The bundled checkpoint filenames alone do not establish their provenance.
-
-The repository currently ignores all `*.txt` and `*.sh` files. If a text model
-or reproduction script must be included in a release, explicitly track it or
-adjust the ignore rules before tagging.
-
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
