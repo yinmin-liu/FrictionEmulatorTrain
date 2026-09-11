@@ -23,13 +23,13 @@ Example:
       --batch-size 4096 \
       --n-seeds 5 \
       --folder ./data \
-      --model-file ./friction_emulator.txt \
-      --checkpoint ./friction_emulator.pt \
-      --report-data ./training_report_data.npz
+      --model-file ./friction_emulator/friction_emulator.txt \
+      --checkpoint ./friction_emulator/friction_emulator.pt \
+      --report-data ./friction_emulator/training_report_data.npz
 
 Generate plots afterward in a separate process:
   python plot_training_results.py \
-      --report-data ./training_report_data.npz \
+      --report-data ./friction_emulator/training_report_data.npz \
       --plots-dir ./plots
 """
 
@@ -709,8 +709,8 @@ def train_one_seed(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train friction emulator with PyTorch")
     parser.add_argument("--folder", type=str, default="./data")
-    parser.add_argument("--model-file", type=str, default="./friction_emulator.txt")
-    parser.add_argument("--checkpoint", type=str, default="./friction_emulator.pt")
+    parser.add_argument("--model-file", type=str, default="./friction_emulator/friction_emulator.txt")
+    parser.add_argument("--checkpoint", type=str, default="./friction_emulator/friction_emulator.pt")
     parser.add_argument("--n-ranks", type=int, default=1)
     parser.add_argument("--in-dim", type=int, default=2)
     parser.add_argument("--out-dim", type=int, default=1)
@@ -727,7 +727,7 @@ def main() -> None:
     parser.add_argument("--n-seeds", type=int, default=5)
     parser.add_argument("--print-every", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
-    parser.add_argument("--report-data", type=str, default="./training_report_data.npz")
+    parser.add_argument("--report-data", type=str, default="./friction_emulator/training_report_data.npz")
     parser.add_argument(
         "--normalization",
         type=str,
@@ -758,6 +758,9 @@ def main() -> None:
     parser.add_argument("--slow-vmag-threshold", type=float, default=1e-6)
     parser.add_argument("--fast-vmag-threshold", type=float, default=1e-5)
     args = parser.parse_args()
+
+    for output_path in (args.model_file, args.checkpoint, args.report_data):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     if not (0.0 < args.lr_factor < 1.0):
         raise RuntimeError("--lr-factor must be between 0 and 1")

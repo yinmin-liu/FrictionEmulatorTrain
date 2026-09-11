@@ -3,12 +3,12 @@ torchrun --nproc_per_node=1 train.py \
 	--lr 1e-3 --lr-scheduler plateau --lr-patience 4 --lr-factor 0.5 --lr-min 1e-6 \
 	--batch-size 16384 --n-seeds 1 --print-every 50 \
    --folder ./data \
-   --model-file ./models_scaling_only.txt \
-   --checkpoint ./models_scaling_only.pt \
+   --model-file ./friction_emulator/models_scaling_only.txt \
+   --checkpoint ./friction_emulator/models_scaling_only.pt \
 	--device auto \
 	--normalization raw \
 	--slow-vmag-threshold 1e-6 \
 	--fast-vmag-threshold 1e-5 \
-	--report-data ./training_report_scaling_only.npz \
+	--report-data ./friction_emulator/training_report_scaling_only.npz \
 	--disable-vmag-filter \
 	--disable-joint-sampling

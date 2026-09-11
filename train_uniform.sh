@@ -3,8 +3,8 @@ torchrun --nproc_per_node=1 train.py \
 	--lr 1e-3 --lr-scheduler plateau --lr-patience 4 --lr-factor 0.5 --lr-min 1e-6 \
 	--batch-size 16384 --n-seeds 1 --print-every 50 \
    --folder ./data \
-   --model-file ./models_uniform_standardized.txt \
-   --checkpoint ./models_uniform_standardized.pt \
+   --model-file ./friction_emulator/models_uniform_standardized.txt \
+   --checkpoint ./friction_emulator/models_uniform_standardized.pt \
 	--device auto \
 	--normalization standard \
 	--min-vmag 5e-8 \
@@ -12,4 +12,4 @@ torchrun --nproc_per_node=1 train.py \
 	--train-samples 30000 --joint-sampling-seed 42 \
 	--slow-vmag-threshold 1e-6 \
 	--fast-vmag-threshold 1e-5 \
-	--report-data ./training_report_uniform_standardized.npz
+	--report-data ./friction_emulator/training_report_uniform_standardized.npz

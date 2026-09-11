@@ -32,7 +32,7 @@ Deploy the updated friction_emulator/friction_emulator.py with the new checkpoin
 Text export stores the fitted affine statistics; external text-model consumers
 must also clamp physical outputs to zero.
 
-The comparison script reads training_report_uniform_standardized.npz and
-training_report_full_preprocessing.npz and rejects mismatched test inputs or
+The comparison script reads friction_emulator/training_report_uniform_standardized.npz and
+friction_emulator/training_report_full_preprocessing.npz and rejects mismatched test inputs or
 validation/test targets. Plotting requires matplotlib. Existing scaling-only
 scripts and outputs remain available as a separate experiment.

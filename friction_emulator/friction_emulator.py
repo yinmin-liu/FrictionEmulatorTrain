@@ -4,10 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-DEFAULT_WEIGHTS_PATH = (
-    "/home1/10783/yinmin/work/Applications/ISSM/src/c/modules/"
-    "FrictionEmulator/trained_models/friction_emulator.pt"
-)
+DEFAULT_WEIGHTS_PATH = str(Path(__file__).resolve().parent / "friction_emulator.pt")
 
 X_FLOOR = np.array([1.0e-30, 1.0e-12], dtype=np.float32)
 Y_FLOOR = np.array([1.0e-30], dtype=np.float32)
