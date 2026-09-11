@@ -282,6 +282,61 @@ def save_matplotlib_figure(fig, path: Path) -> None:
     print(f"Saved {png_path}")
 
 
+def plot_pdf_curve(
+    ax,
+    values: np.ndarray,
+    bins: int,
+    color: str = "#1f77b4",
+    linewidth: float = 1.5,
+) -> None:
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if len(finite) == 0:
+        ax.text(0.5, 0.5, "No finite values", ha="center", va="center", transform=ax.transAxes)
+        return
+    density, edges = np.histogram(finite, bins=bins, density=True)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    ax.plot(centers, density, color=color, linewidth=linewidth)
+
+
+def plot_histogram_with_pdf_curve(
+    ax,
+    values: np.ndarray,
+    bins: int,
+    x_range: tuple[float, float],
+    color: str = "#9467bd",
+) -> None:
+    count_ax = ax.twinx()
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    finite = finite[(finite >= x_range[0]) & (finite <= x_range[1])]
+    if len(finite) == 0:
+        ax.text(0.5, 0.5, "No finite values", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xlim(*x_range)
+        count_ax.set_xlim(*x_range)
+        return
+
+    counts, edges = np.histogram(finite, bins=bins, range=x_range)
+    density, _ = np.histogram(finite, bins=edges, density=True)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    count_ax.bar(
+        centers,
+        counts,
+        width=np.diff(edges),
+        align="center",
+        color=color,
+        alpha=0.25,
+        edgecolor="none",
+    )
+    ax.plot(centers, density, color=color, linewidth=1.5)
+    ax.set_xlim(*x_range)
+    count_ax.set_xlim(*x_range)
+    count_ax.set_ylim(bottom=0.0)
+    ax.set_ylabel("PDF")
+    count_ax.set_ylabel("Count")
+
+
 def save_relative_error_heatmap(
     out_dir: Path,
     test_x_raw: np.ndarray,
@@ -512,9 +567,13 @@ def save_accuracy_outputs(
     history_by_seed: Dict[int, List[Dict[str, float]]],
     best_seed: int,
     test_x_raw: np.ndarray,
+    filename_prefix: str = "",
 ) -> None:
     out_dir = Path(plots_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    def figure_path(name: str) -> Path:
+        return out_dir / f"{filename_prefix}{name}"
 
     test_true, test_pred = split_predictions["test"]
     m_values_full = infer_m_values_full(test_x_raw, test_pred)
@@ -551,18 +610,23 @@ def save_accuracy_outputs(
     ax.plot([lo, hi], [lo, hi], "k--", linewidth=0.8, label="ideal")
     ax.legend(frameon=False)
     fig.tight_layout()
-    scatter_path = out_dir / "prediction_scatter.png"
+    scatter_path = figure_path("prediction_scatter.png")
     save_matplotlib_figure(fig, scatter_path)
     plt.close(fig)
 
-    test_error = (test_pred - test_true).reshape(-1)
+    test_true_flat = test_true.reshape(-1).astype(np.float64)
+    test_pred_flat = test_pred.reshape(-1).astype(np.float64)
+    relative_error_percent = (
+        np.abs(test_pred_flat - test_true_flat) / (np.abs(test_true_flat) + 1e-10) * 100.0
+    )
     fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
-    ax.hist(test_error, bins=60, alpha=0.85)
-    ax.set_yscale("log")
+    upper = float(np.nanpercentile(relative_error_percent, 99.0))
+    plot_values = relative_error_percent[relative_error_percent <= upper]
+    plot_pdf_curve(ax, plot_values, bins=80, color="#1f77b4")
     ax.axvline(0.0, color="k", linestyle="--", linewidth=0.8)
     fig.tight_layout()
-    hist_path = out_dir / "test_error_histogram.png"
-    save_matplotlib_figure(fig, hist_path)
+    rel_err_pdf_path = figure_path("test_relative_error_pdf.png")
+    save_matplotlib_figure(fig, rel_err_pdf_path)
     plt.close(fig)
 
     history = history_by_seed[best_seed]
@@ -575,17 +639,20 @@ def save_accuracy_outputs(
     ax.set_yscale("log")
     ax.legend(frameon=False)
     fig.tight_layout()
-    loss_path = out_dir / "loss_curves.png"
+    loss_path = figure_path("loss_curves.png")
     save_matplotlib_figure(fig, loss_path)
     plt.close(fig)
 
     if len(m_values) > 0:
         fig, ax = plt.subplots(figsize=LATEX_FIGSIZE)
-        ax.hist(m_values, bins=60, alpha=0.85)
-        ax.set_yscale("log")
+        plot_histogram_with_pdf_curve(
+            ax,
+            m_values,
+            bins=100,
+            x_range=(2.0, 4.0),
+            color="#9467bd",
+        )
         fig.tight_layout()
-        m_path = out_dir / "inferred_m_histogram.png"
+        m_path = figure_path("inferred_m_pdf.png")
         save_matplotlib_figure(fig, m_path)
         plt.close(fig)
-
-    save_relative_error_heatmap(out_dir, test_x_raw, test_true, test_pred, plt)

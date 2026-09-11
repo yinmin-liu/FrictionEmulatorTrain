@@ -12,6 +12,7 @@ def main() -> None:
     )
     parser.add_argument("--report-data", type=str, default="./friction_emulator/training_report_data.npz")
     parser.add_argument("--plots-dir", type=str, default="./plots")
+    parser.add_argument("--filename-prefix", type=str, default="")
     args = parser.parse_args()
 
     split_predictions, history_by_seed, best_seed, test_x_raw = (
@@ -23,6 +24,7 @@ def main() -> None:
         history_by_seed,
         best_seed,
         test_x_raw,
+        filename_prefix=args.filename_prefix,
     )
 
 
