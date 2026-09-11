@@ -81,7 +81,7 @@ def init_model(weights_path: str = DEFAULT_WEIGHTS_PATH, device: str = "auto") -
 
 
 def _transform_features(feats_t: torch.Tensor) -> torch.Tensor:
-    if _NORMALIZATION == "raw":
+    if _NORMALIZATION in ("raw", "standard"):
         return feats_t
     if _NORMALIZATION == "sqrt":
         return torch.sqrt(torch.clamp_min(feats_t, 0.0))
@@ -95,8 +95,8 @@ def _transform_features(feats_t: torch.Tensor) -> torch.Tensor:
 
 
 def _inverse_transform_alpha2(pred_trans: torch.Tensor) -> torch.Tensor:
-    if _NORMALIZATION == "raw":
-        return pred_trans
+    if _NORMALIZATION in ("raw", "standard"):
+        return torch.clamp_min(pred_trans, 0.0)
     if _NORMALIZATION == "sqrt":
         return torch.square(torch.clamp_min(pred_trans, 0.0))
     if _NORMALIZATION in ("log", "mixed"):

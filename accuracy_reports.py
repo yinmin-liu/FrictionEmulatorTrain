@@ -110,6 +110,7 @@ def predict_raw(
         xb_raw = torch.as_tensor(x_raw[start:end], dtype=torch.float32, device=device)
         xb = (xb_raw - x_mean_t) / x_std_t
         pred_raw = model(xb) * y_std_t + y_mean_t
+        pred_raw = torch.clamp_min(pred_raw, 0.0)
         preds.append(pred_raw.detach().cpu().numpy())
 
     return np.concatenate(preds, axis=0)

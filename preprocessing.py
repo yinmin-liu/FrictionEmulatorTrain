@@ -130,7 +130,7 @@ def build_normalization_config(
             y_floor=y_floor.astype(np.float64),
         )
 
-    if mode not in ("log", "sqrt"):
+    if mode not in ("log", "sqrt", "standard"):
         raise RuntimeError(f"Unsupported normalization mode: {mode}")
 
     x_trans = transform_x_np(train_x_raw, mode, x_floor)
@@ -154,7 +154,7 @@ def build_normalization_config(
 
 def transform_x_np(x_raw: np.ndarray, mode: str, x_floor: np.ndarray) -> np.ndarray:
     x = np.asarray(x_raw, dtype=np.float64)
-    if mode == "raw":
+    if mode in ("raw", "standard"):
         return x
     if mode == "mixed":
         x_trans = x.copy()
@@ -167,7 +167,7 @@ def transform_x_np(x_raw: np.ndarray, mode: str, x_floor: np.ndarray) -> np.ndar
 
 def transform_y_np(y_raw: np.ndarray, mode: str, y_floor: np.ndarray) -> np.ndarray:
     y = np.asarray(y_raw, dtype=np.float64)
-    if mode == "raw":
+    if mode in ("raw", "standard"):
         return y
     if mode == "sqrt":
         return sqrt_transform(y)
@@ -183,8 +183,9 @@ def normalize_y_np(y_raw: np.ndarray, norm: NormalizationConfig) -> np.ndarray:
 
 
 def inverse_transform_y_np(y_trans: np.ndarray, norm: NormalizationConfig) -> np.ndarray:
-    if norm.mode == "raw":
-        return y_trans
+    if norm.mode in ("raw", "standard"):
+        # Clamp physical predictions only; training targets and loss stay raw-scaled.
+        return np.maximum(y_trans, 0.0)
     if norm.mode == "sqrt":
         return np.maximum(y_trans, 0.0) ** 2
     return np.exp(y_trans)
@@ -195,7 +196,7 @@ def denormalize_y_np(y_norm: np.ndarray, norm: NormalizationConfig) -> np.ndarra
 
 
 def transform_x_torch(x_raw: torch.Tensor, norm: NormalizationConfig, device: torch.device) -> torch.Tensor:
-    if norm.mode == "raw":
+    if norm.mode in ("raw", "standard"):
         return x_raw
     x_floor = torch.as_tensor(norm.x_floor, dtype=torch.float32, device=device)
     if norm.mode == "mixed":
@@ -208,8 +209,9 @@ def transform_x_torch(x_raw: torch.Tensor, norm: NormalizationConfig, device: to
 
 
 def inverse_transform_y_torch(y_trans: torch.Tensor, norm: NormalizationConfig) -> torch.Tensor:
-    if norm.mode == "raw":
-        return y_trans
+    if norm.mode in ("raw", "standard"):
+        # y_trans has already been converted back to physical units.
+        return torch.clamp_min(y_trans, 0.0)
     if norm.mode == "sqrt":
         return torch.square(torch.clamp_min(y_trans, 0.0))
     return torch.exp(y_trans)

@@ -11,12 +11,12 @@ from accuracy_reports import load_accuracy_report_data
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare raw-scaled and fully preprocessed emulator training reports."
+        description="Compare uniformly sampled/standardized and fully preprocessed training reports."
     )
     parser.add_argument("--raw-report", type=Path, required=True)
     parser.add_argument("--preprocessed-report", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, default=Path("./plots_comparison"))
-    parser.add_argument("--raw-label", type=str, default="scaling only")
+    parser.add_argument("--raw-label", type=str, default="uniform sampling + standardization")
     parser.add_argument("--preprocessed-label", type=str, default="full preprocessing")
     parser.add_argument("--scatter-split", type=str, default="test", choices=["train", "validation", "test"])
     parser.add_argument("--max-scatter-points", type=int, default=12000)
@@ -38,6 +38,12 @@ def main() -> None:
 
     raw = load_report(args.raw_report)
     pre = load_report(args.preprocessed_report)
+
+    if raw["test_x_raw"] is None or pre["test_x_raw"] is None or not np.array_equal(raw["test_x_raw"], pre["test_x_raw"]):
+        raise ValueError("Test inputs differ. Retrain both workflows with the shared original-data split.")
+    for split in ("validation", "test"):
+        if not np.array_equal(raw["split_predictions"][split][0], pre["split_predictions"][split][0]):
+            raise ValueError(f"{split} targets differ. Retrain both workflows on the same source data.")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     plot_learning_curves(

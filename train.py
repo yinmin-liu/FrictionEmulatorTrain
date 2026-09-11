@@ -512,7 +512,8 @@ def export_to_cpp_text(
         f.write(f"H1 {h1}\n")
         f.write(f"H2 {h2}\n")
         f.write(f"OUT {out_dim}\n")
-        if norm.mode != "raw":
+        # Raw standardization uses the existing affine text-model format.
+        if norm.mode not in ("raw", "standard"):
             f.write(f"NORMALIZATION {norm.mode}\n")
             if norm.mode in ("log", "mixed"):
                 f.write("LOG_BASE e\n")
@@ -731,10 +732,10 @@ def main() -> None:
         "--normalization",
         type=str,
         default="sqrt",
-        choices=["raw", "sqrt", "log", "mixed"],
+        choices=["raw", "standard", "sqrt", "log", "mixed"],
         help=(
             "Input/output preprocessing before scaling. "
-            "'raw' applies only the hard-coded raw scaling constants."
+            "'raw' uses fixed scaling; 'standard' fits mean/std on raw training values."
         ),
     )
     parser.add_argument("--min-vmag", type=float, default=5e-8)
@@ -749,6 +750,8 @@ def main() -> None:
         action="store_true",
         help="Use the full training split instead of sqrt(C2),sqrt(vmag) joint sampling.",
     )
+    parser.add_argument("--uniform-sampling", action="store_true",
+                        help="Uniformly sample --train-samples training rows without replacement.")
     parser.add_argument("--joint-c2-bins", type=int, default=30)
     parser.add_argument("--joint-vmag-bins", type=int, default=30)
     parser.add_argument("--joint-sampling-seed", type=int, default=42)
@@ -811,7 +814,9 @@ def main() -> None:
         print("Min vmag:     disabled")
     else:
         print(f"Min vmag:     {fmt_sci(args.min_vmag)}")
-    if args.disable_joint_sampling:
+    if args.uniform_sampling:
+        print(f"Train sample: {args.train_samples} uniformly selected rows")
+    elif args.disable_joint_sampling:
         print("Train sample: disabled; using full training split")
     else:
         print(
@@ -838,13 +843,19 @@ def main() -> None:
     x_floor = np.array([1e-30, 1e-12], dtype=np.float64)
     y_floor = np.array([1e-30], dtype=np.float64)
 
+    # Holdouts are drawn before any workflow-specific training filtering.
+    train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
     removed_low_vmag = 0
     if not args.disable_vmag_filter:
-        all_data, removed_low_vmag = filter_min_vmag_samples(all_data, args.min_vmag)
+        train_data, removed_low_vmag = filter_min_vmag_samples(train_data, args.min_vmag)
 
-    train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
     full_train_count = len(train_data)
-    if not args.disable_joint_sampling:
+    if args.uniform_sampling:
+        rng = np.random.default_rng(args.joint_sampling_seed)
+        indices = rng.choice(len(train_data), size=min(args.train_samples, len(train_data)), replace=False)
+        train_data = [train_data[i] for i in indices]
+        print(f"Uniform sampler selected {len(train_data)} training rows.")
+    elif not args.disable_joint_sampling:
         train_data = sqrt_joint_sample_training_data(
             train_data,
             n_samples=args.train_samples,
@@ -979,7 +990,10 @@ def main() -> None:
         "removed_low_vmag": removed_low_vmag,
         "full_train_samples_before_joint_sampling": full_train_count,
         "train_samples": len(train_data),
-        "joint_sampling_enabled": not args.disable_joint_sampling,
+        "joint_sampling_enabled": not args.disable_joint_sampling and not args.uniform_sampling,
+        "uniform_sampling_enabled": args.uniform_sampling,
+        "split_before_filter": True,
+        "split_seed": 42,
         "joint_c2_bins": args.joint_c2_bins,
         "joint_vmag_bins": args.joint_vmag_bins,
         "joint_sampling_seed": args.joint_sampling_seed,
