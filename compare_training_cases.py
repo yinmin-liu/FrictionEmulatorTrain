@@ -462,7 +462,6 @@ def plot_combined_comparison(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, facecolor="white")
-    fig.savefig(out_path.with_suffix(".pdf"), facecolor="white")
     plt.close(fig)
     print(f"Saved {out_path}")
 
