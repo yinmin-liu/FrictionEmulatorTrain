@@ -843,12 +843,12 @@ def main() -> None:
     x_floor = np.array([1e-30, 1e-12], dtype=np.float64)
     y_floor = np.array([1e-30], dtype=np.float64)
 
-    # Holdouts are drawn before any workflow-specific training filtering.
-    train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
+    # Match the original workflow: filter the dataset before the seeded split.
     removed_low_vmag = 0
     if not args.disable_vmag_filter:
-        train_data, removed_low_vmag = filter_min_vmag_samples(train_data, args.min_vmag)
+        all_data, removed_low_vmag = filter_min_vmag_samples(all_data, args.min_vmag)
 
+    train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
     full_train_count = len(train_data)
     if args.uniform_sampling:
         rng = np.random.default_rng(args.joint_sampling_seed)
@@ -992,7 +992,7 @@ def main() -> None:
         "train_samples": len(train_data),
         "joint_sampling_enabled": not args.disable_joint_sampling and not args.uniform_sampling,
         "uniform_sampling_enabled": args.uniform_sampling,
-        "split_before_filter": True,
+        "split_before_filter": False,
         "split_seed": 42,
         "joint_c2_bins": args.joint_c2_bins,
         "joint_vmag_bins": args.joint_vmag_bins,

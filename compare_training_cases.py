@@ -40,7 +40,7 @@ def main() -> None:
     pre = load_report(args.preprocessed_report)
 
     if raw["test_x_raw"] is None or pre["test_x_raw"] is None or not np.array_equal(raw["test_x_raw"], pre["test_x_raw"]):
-        raise ValueError("Test inputs differ. Retrain both workflows with the shared original-data split.")
+        raise ValueError("Test inputs differ. Retrain both workflows with the same velocity filter and seeded split.")
     for split in ("validation", "test"):
         if not np.array_equal(raw["split_predictions"][split][0], pre["split_predictions"][split][0]):
             raise ValueError(f"{split} targets differ. Retrain both workflows on the same source data.")

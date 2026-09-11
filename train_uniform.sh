@@ -7,7 +7,7 @@ torchrun --nproc_per_node=1 train.py \
    --checkpoint ./models_uniform_standardized.pt \
 	--device auto \
 	--normalization standard \
-	--disable-vmag-filter \
+	--min-vmag 5e-8 \
 	--uniform-sampling \
 	--train-samples 30000 --joint-sampling-seed 42 \
 	--slow-vmag-threshold 1e-6 \
