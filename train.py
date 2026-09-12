@@ -23,13 +23,13 @@ Example:
       --batch-size 4096 \
       --n-seeds 5 \
       --folder ./data \
-      --model-file ./friction_emulator/friction_emulator.txt \
-      --checkpoint ./friction_emulator/friction_emulator.pt \
-      --report-data ./friction_emulator/training_report_data.npz
+      --model-file ./friction_emulator/model_sqrt_weighted_standard.txt \
+      --checkpoint ./friction_emulator/model_sqrt_weighted_standard.pt \
+      --report-data ./friction_emulator/training_report_sqrt_weighted_standard.npz
 
 Generate plots afterward in a separate process:
   python plot_training_results.py \
-      --report-data ./friction_emulator/training_report_data.npz \
+      --report-data ./friction_emulator/training_report_sqrt_weighted_standard.npz \
       --plots-dir ./plots
 """
 
@@ -57,7 +57,7 @@ from preprocessing import (
     RAW_X_SCALE,
     RAW_Y_SCALE,
     NormalizationConfig,
-    build_normalization_config,
+    build_preprocessing_config,
     inverse_transform_y_torch,
     transform_x_np,
     transform_x_torch,
@@ -709,8 +709,8 @@ def train_one_seed(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train friction emulator with PyTorch")
     parser.add_argument("--folder", type=str, default="./data")
-    parser.add_argument("--model-file", type=str, default="./friction_emulator/friction_emulator.txt")
-    parser.add_argument("--checkpoint", type=str, default="./friction_emulator/friction_emulator.pt")
+    parser.add_argument("--model-file", type=str, default=None)
+    parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--n-ranks", type=int, default=1)
     parser.add_argument("--in-dim", type=int, default=2)
     parser.add_argument("--out-dim", type=int, default=1)
@@ -727,17 +727,13 @@ def main() -> None:
     parser.add_argument("--n-seeds", type=int, default=5)
     parser.add_argument("--print-every", type=int, default=100)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
-    parser.add_argument("--report-data", type=str, default="./friction_emulator/training_report_data.npz")
-    parser.add_argument(
-        "--normalization",
-        type=str,
-        default="sqrt",
-        choices=["raw", "standard", "sqrt", "log", "mixed"],
-        help=(
-            "Input/output preprocessing before scaling. "
-            "'raw' uses fixed scaling; 'standard' fits mean/std on raw training values."
-        ),
-    )
+    parser.add_argument("--report-data", type=str, default=None)
+    parser.add_argument("--transform", choices=["sqrt", "log", "none"], default="sqrt",
+                        help="Nonlinear transform applied to inputs and target before scaling.")
+    parser.add_argument("--sampling", choices=["uniform", "weighted"], default="weighted",
+                        help="Uniform selection or inverse-bin-frequency sampling in sqrt input space.")
+    parser.add_argument("--scaling", choices=["standard", "fixed"], default="standard",
+                        help="Fit mean/std on transformed training values, or use fixed reference divisors in transform space.")
     parser.add_argument("--min-vmag", type=float, default=5e-8)
     parser.add_argument(
         "--disable-vmag-filter",
@@ -745,19 +741,16 @@ def main() -> None:
         help="Keep all rows instead of removing rows with vmag below --min-vmag.",
     )
     parser.add_argument("--train-samples", type=int, default=30000)
-    parser.add_argument(
-        "--disable-joint-sampling",
-        action="store_true",
-        help="Use the full training split instead of sqrt(C2),sqrt(vmag) joint sampling.",
-    )
-    parser.add_argument("--uniform-sampling", action="store_true",
-                        help="Uniformly sample --train-samples training rows without replacement.")
     parser.add_argument("--joint-c2-bins", type=int, default=30)
     parser.add_argument("--joint-vmag-bins", type=int, default=30)
     parser.add_argument("--joint-sampling-seed", type=int, default=42)
     parser.add_argument("--slow-vmag-threshold", type=float, default=1e-6)
     parser.add_argument("--fast-vmag-threshold", type=float, default=1e-5)
     args = parser.parse_args()
+    run_name = f"{args.transform}_{args.sampling}_{args.scaling}"
+    args.model_file = args.model_file or f"./friction_emulator/model_{run_name}.txt"
+    args.checkpoint = args.checkpoint or f"./friction_emulator/model_{run_name}.pt"
+    args.report_data = args.report_data or f"./friction_emulator/training_report_{run_name}.npz"
 
     for output_path in (args.model_file, args.checkpoint, args.report_data):
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -812,15 +805,14 @@ def main() -> None:
     print(f"Model file:   {args.model_file}")
     print(f"Checkpoint:   {args.checkpoint}")
     print(f"Report data:  {args.report_data}")
-    print(f"Normalization:{args.normalization}")
+    print(f"Transform:    {args.transform}")
+    print(f"Scaling:      {args.scaling}")
     if args.disable_vmag_filter:
         print("Min vmag:     disabled")
     else:
         print(f"Min vmag:     {fmt_sci(args.min_vmag)}")
-    if args.uniform_sampling:
+    if args.sampling == "uniform":
         print(f"Train sample: {args.train_samples} uniformly selected rows")
-    elif args.disable_joint_sampling:
-        print("Train sample: disabled; using full training split")
     else:
         print(
             "Train sample: "
@@ -853,12 +845,12 @@ def main() -> None:
 
     train_data, val_data, test_data = split_data(all_data, 0.70, 0.15, split_seed=42)
     full_train_count = len(train_data)
-    if args.uniform_sampling:
+    if args.sampling == "uniform":
         rng = np.random.default_rng(args.joint_sampling_seed)
         indices = rng.choice(len(train_data), size=min(args.train_samples, len(train_data)), replace=False)
         train_data = [train_data[i] for i in indices]
         print(f"Uniform sampler selected {len(train_data)} training rows.")
-    elif not args.disable_joint_sampling:
+    else:
         train_data = sqrt_joint_sample_training_data(
             train_data,
             n_samples=args.train_samples,
@@ -866,8 +858,6 @@ def main() -> None:
             vmag_bins=args.joint_vmag_bins,
             seed=args.joint_sampling_seed,
         )
-    else:
-        print(f"Joint train sampler disabled; using all {len(train_data)} training samples.")
     if args.in_dim != len(RAW_X_SCALE):
         raise RuntimeError(
             f"Expected in_dim={len(RAW_X_SCALE)} for hard-coded normalization, got {args.in_dim}"
@@ -880,7 +870,7 @@ def main() -> None:
     train_x_raw, train_y_raw = to_numpy(train_data)
     val_x_raw, val_y_raw = to_numpy(val_data)
     test_x_raw, test_y_raw = to_numpy(test_data)
-    norm = build_normalization_config(args.normalization, train_x_raw, train_y_raw, x_floor, y_floor)
+    norm = build_preprocessing_config(args.transform, args.scaling, train_x_raw, train_y_raw, x_floor, y_floor)
 
     print(f"x_mean:       {fmt_seq(norm.x_mean.tolist())}")
     print(f"x_std:        {fmt_seq(norm.x_std.tolist())}")
@@ -981,7 +971,10 @@ def main() -> None:
     common_metadata = {
         "in_dim": args.in_dim,
         "out_dim": args.out_dim,
-        "normalization": norm.mode,
+        "normalization": norm.mode,  # Legacy inference/text-format compatibility.
+        "transform": args.transform,
+        "sampling": args.sampling,
+        "scaling": args.scaling,
         "x_mean": norm.x_mean.astype(np.float64),
         "x_std": norm.x_std.astype(np.float64),
         "y_mean": norm.y_mean.astype(np.float64),
@@ -993,8 +986,8 @@ def main() -> None:
         "removed_low_vmag": removed_low_vmag,
         "full_train_samples_before_joint_sampling": full_train_count,
         "train_samples": len(train_data),
-        "joint_sampling_enabled": not args.disable_joint_sampling and not args.uniform_sampling,
-        "uniform_sampling_enabled": args.uniform_sampling,
+        "joint_sampling_enabled": args.sampling == "weighted",
+        "uniform_sampling_enabled": args.sampling == "uniform",
         "split_before_filter": False,
         "split_seed": 42,
         "joint_c2_bins": args.joint_c2_bins,

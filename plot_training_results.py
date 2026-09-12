@@ -10,7 +10,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate training accuracy plots from a saved report-data artifact."
     )
-    parser.add_argument("--report-data", type=str, default="./friction_emulator/training_report_data.npz")
+    parser.add_argument("--report-data", type=str, default="./friction_emulator/training_report_sqrt_weighted_standard.npz")
     parser.add_argument("--plots-dir", type=str, default="./plots")
     parser.add_argument("--filename-prefix", type=str, default="")
     args = parser.parse_args()

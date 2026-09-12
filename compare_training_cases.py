@@ -127,21 +127,13 @@ def load_checkpoint_report(path: Path, reference: dict[str, object]) -> dict[str
     """Evaluate checkpoint weights on the same saved test inputs for both cases."""
     import torch
     from friction_emulator.friction_emulator import FrictionMLP
-    from preprocessing import NormalizationConfig
+    from preprocessing import preprocessing_from_checkpoint
     from train import predict_raw
 
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     model = FrictionMLP(**{key: int(checkpoint[key]) for key in ("in_dim", "h1", "h2", "out_dim")})
     model.load_state_dict(checkpoint["state_dict"])
-    mode = checkpoint["normalization"]
-    # Standardization uses the stored means/scales without a nonlinear transform.
-    if mode == "standard":
-        mode = "raw"
-    if mode not in {"raw", "sqrt", "log", "mixed"}:
-        raise ValueError(f"Unsupported normalization: {mode}")
-    norm = NormalizationConfig(mode=mode, **{
-        key: checkpoint[key] for key in ("x_mean", "x_std", "y_mean", "y_std", "x_floor", "y_floor")
-    })
+    norm = preprocessing_from_checkpoint(checkpoint)
     x = reference["test_x_raw"]
     prediction = predict_raw(model, x, norm, torch.device("cpu"), 4096)
     if not np.isfinite(prediction).all():

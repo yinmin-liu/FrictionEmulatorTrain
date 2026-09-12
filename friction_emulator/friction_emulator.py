@@ -59,7 +59,9 @@ def init_model(weights_path: str = DEFAULT_WEIGHTS_PATH, device: str = "auto") -
     model.to(resolved_device)
     model.eval()
 
-    normalization = str(checkpoint.get("normalization", NORMALIZATION))
+    normalization = str(checkpoint.get("transform", checkpoint.get("normalization", NORMALIZATION)))
+    if normalization == "none":
+        normalization = "raw"
     x_floor = np.asarray(checkpoint.get("x_floor", X_FLOOR), dtype=np.float32)
     x_mean = np.asarray(checkpoint.get("x_mean", X_MEAN), dtype=np.float32)
     x_std = np.asarray(checkpoint.get("x_std", X_STD), dtype=np.float32)

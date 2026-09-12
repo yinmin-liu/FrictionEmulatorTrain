@@ -23,6 +23,11 @@ class NormalizationConfig:
     y_std: np.ndarray
     x_floor: np.ndarray
     y_floor: np.ndarray
+    scaling: str | None = None
+
+    @property
+    def transform(self) -> str:
+        return "none" if self.mode in ("raw", "standard") else self.mode
 
 
 @dataclass
@@ -91,6 +96,51 @@ def raw_outlier_filter_mask(
         mask &= np.isfinite(values) & (values >= lower) & (values <= upper)
 
     return OutlierFilterResult(mask=mask, bounds=bounds)
+
+
+def build_preprocessing_config(
+    transform: str, scaling: str,
+    train_x_raw: np.ndarray, train_y_raw: np.ndarray,
+    x_floor: np.ndarray, y_floor: np.ndarray,
+) -> NormalizationConfig:
+    """Transform first, then independently apply fitted or fixed affine scaling.
+
+    Fixed scaling maps the reference divisors to the selected transform space.
+    It never fits statistics: none uses S, sqrt uses sqrt(S), log uses abs(log(S)).
+    """
+    if transform not in {"none", "sqrt", "log"}:
+        raise ValueError(f"Unsupported transform: {transform}")
+    if scaling not in {"standard", "fixed"}:
+        raise ValueError(f"Unsupported scaling: {scaling}")
+    mode = ("raw" if scaling == "fixed" else "standard") if transform == "none" else transform
+    if scaling == "standard":
+        config = build_normalization_config(mode, train_x_raw, train_y_raw, x_floor, y_floor)
+    else:
+        x_scale, y_scale = RAW_X_SCALE.copy(), RAW_Y_SCALE.copy()
+        if transform == "sqrt":
+            x_scale, y_scale = np.sqrt(x_scale), np.sqrt(y_scale)
+        elif transform == "log":
+            x_scale, y_scale = np.abs(np.log(x_scale)), np.abs(np.log(y_scale))
+        config = NormalizationConfig(
+            mode=mode, x_mean=RAW_X_OFFSET.copy(), x_std=x_scale,
+            y_mean=RAW_Y_OFFSET.copy(), y_std=y_scale,
+            x_floor=x_floor.astype(np.float64), y_floor=y_floor.astype(np.float64),
+        )
+    config.scaling = scaling
+    return config
+
+
+def preprocessing_from_checkpoint(checkpoint: dict) -> NormalizationConfig:
+    """Use saved affine parameters; retain support for legacy normalization modes."""
+    mode = checkpoint.get("transform", checkpoint.get("normalization", "sqrt"))
+    if mode == "none":
+        mode = "raw"
+    if mode not in {"raw", "standard", "sqrt", "log", "mixed"}:
+        raise ValueError(f"Unsupported checkpoint transform: {mode}")
+    return NormalizationConfig(mode=mode, scaling=checkpoint.get("scaling"), **{
+        key: np.asarray(checkpoint[key], dtype=np.float64)
+        for key in ("x_mean", "x_std", "y_mean", "y_std", "x_floor", "y_floor")
+    })
 
 
 def build_normalization_config(
