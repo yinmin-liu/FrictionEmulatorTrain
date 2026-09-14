@@ -13,10 +13,12 @@ X_STD = np.array([1.2777508831457713, 1.0928669173617296], dtype=np.float32)
 Y_MEAN = np.array([25.432599186435276], dtype=np.float32)
 Y_STD = np.array([1.4568046734404581], dtype=np.float32)
 NORMALIZATION = "log"
+VMAG_MIN = 5.0e-8
 
 _MODEL = None
 _DEVICE = None
 _NORMALIZATION = NORMALIZATION
+_VMAG_MIN = VMAG_MIN
 _X_FLOOR_T = None
 _X_MEAN_T = None
 _X_STD_T = None
@@ -37,7 +39,7 @@ class FrictionMLP(nn.Module):# {{{
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)# }}}
 def init_model(weights_path: str = DEFAULT_WEIGHTS_PATH, device: str = "auto") -> None:# {{{
-    global _MODEL, _DEVICE, _NORMALIZATION, _X_FLOOR_T, _X_MEAN_T, _X_STD_T, _Y_MEAN_T, _Y_STD_T
+    global _MODEL, _DEVICE, _NORMALIZATION, _VMAG_MIN, _X_FLOOR_T, _X_MEAN_T, _X_STD_T, _Y_MEAN_T, _Y_STD_T
 
     ckpt_path = Path(weights_path)
     if not ckpt_path.exists():
@@ -67,16 +69,21 @@ def init_model(weights_path: str = DEFAULT_WEIGHTS_PATH, device: str = "auto") -
     x_std = np.asarray(checkpoint.get("x_std", X_STD), dtype=np.float32)
     y_mean = np.asarray(checkpoint.get("y_mean", Y_MEAN), dtype=np.float32)
     y_std = np.asarray(checkpoint.get("y_std", Y_STD), dtype=np.float32)
+    vmag_min = float(checkpoint.get("min_vmag", VMAG_MIN))
 
     _MODEL = model
     _DEVICE = resolved_device
     _NORMALIZATION = normalization
+    _VMAG_MIN = vmag_min
     _X_FLOOR_T = torch.as_tensor(x_floor, dtype=torch.float32, device=resolved_device)
     _X_MEAN_T = torch.as_tensor(x_mean, dtype=torch.float32, device=resolved_device)
     _X_STD_T = torch.as_tensor(x_std, dtype=torch.float32, device=resolved_device)
     _Y_MEAN_T = torch.as_tensor(y_mean, dtype=torch.float32, device=resolved_device)
     _Y_STD_T = torch.as_tensor(y_std, dtype=torch.float32, device=resolved_device)
-    print(f"Friction emulator initialized on device: {resolved_device}, normalization: {normalization}")# }}}
+    print(
+        f"Friction emulator initialized on device: {resolved_device}, "
+        f"normalization: {normalization}, min_vmag: {vmag_min:.6e}"
+    )# }}}
 
 
 def _transform_features(feats_t: torch.Tensor) -> torch.Tensor:
@@ -113,6 +120,9 @@ def predict_alpha2_np(feats, *, dtype="float64"):# {{{
         feats_np = feats_np.reshape(1, -1)
     if feats_np.shape[1] != 2:
         raise ValueError(f"Expected input shape (*, 2), got {feats_np.shape}")
+
+    feats_np = feats_np.copy()
+    feats_np[:, 1] = np.maximum(feats_np[:, 1], np.float32(_VMAG_MIN))
 
     feats_t = torch.as_tensor(feats_np, dtype=torch.float32, device=_DEVICE)
     feats_trans = _transform_features(feats_t)
